@@ -27,7 +27,7 @@ class ImageProcessor: ObservableObject {
     private let orangeMaskEstimator = OrangeMaskEstimator()
     private let colorCorrector = ColorCorrector()
     private let userAdjustments = UserAdjustments()
-    private let exportManager = ExportManager()
+    private let exportManager = ExportManager.shared
 
     // MARK: - Core Image Context
 

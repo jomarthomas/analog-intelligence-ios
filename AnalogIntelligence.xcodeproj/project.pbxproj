@@ -40,6 +40,7 @@
 		834E8C43B5323785C14756CE /* ImageProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD59447BABED6A7B5CC3CA29 /* ImageProcessor.swift */; };
 		8889D69AAC4BAEA1A1E5067F /* CameraManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2726080402E43CA9E818D679 /* CameraManager.swift */; };
 		9604121DE47DAEAABA20751D /* AIOptionsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4425B958FB566577542E38C0 /* AIOptionsPanel.swift */; };
+		A1F2E3D4C5B6A7986F8E9D0C /* ManualControlsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = M9F8E7D6C5B4A39827F6E5D4C3 /* ManualControlsPanel.swift */; };
 		A298D1A8CC0242816CCFE77D /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A795DA2D895C02ED7EC41FE8 /* ScanView.swift */; };
 		A5DEF24558D5DD8803DC57D6 /* MultiSelectToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B46E46A0138F537CEA67244 /* MultiSelectToolbar.swift */; };
 		A9F981D5DE4CF320E6F46958 /* ContactSheetGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EB11E9EC9F8919BA3D49D0B /* ContactSheetGenerator.swift */; };
@@ -90,6 +91,7 @@
 		8EAADC9BD69ADCA11F9176E3 /* Gemini_Generated_Image_76svll76svll76sv.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = Gemini_Generated_Image_76svll76svll76sv.png; sourceTree = "<group>"; };
 		8FEC06A55147DE1F6E1F1BEA /* OrangeMaskEstimator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = OrangeMaskEstimator.swift; path = Processing/Pipeline/OrangeMaskEstimator.swift; sourceTree = "<group>"; };
 		94401E23F406371621CE1CED /* InsightsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = InsightsView.swift; path = UI/Insights/InsightsView.swift; sourceTree = "<group>"; };
+		M9F8E7D6C5B4A39827F6E5D4C3 /* ManualControlsPanel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ManualControlsPanel.swift; path = UI/Scan/ManualControlsPanel.swift; sourceTree = "<group>"; };
 		A06D9D648F481B81DC21C304 /* CaptureMode.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CaptureMode.swift; path = Camera/CaptureMode.swift; sourceTree = "<group>"; };
 		A3CAAFE5DD6070370B03D863 /* ExportManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExportManager.swift; path = Processing/Pipeline/ExportManager.swift; sourceTree = "<group>"; };
 		A795DA2D895C02ED7EC41FE8 /* ScanView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ScanView.swift; path = UI/Scan/ScanView.swift; sourceTree = "<group>"; };
@@ -420,6 +422,7 @@
 				A5DEF24558D5DD8803DC57D6 /* MultiSelectToolbar.swift in Sources */,
 				E8251BA8FBCC45E0D450D78E /* InsightsView.swift in Sources */,
 				9604121DE47DAEAABA20751D /* AIOptionsPanel.swift in Sources */,
+				A1F2E3D4C5B6A7986F8E9D0C /* ManualControlsPanel.swift in Sources */,
 				7CAAE88AEE3F04CE03A716A5 /* AdjustView.swift in Sources */,
 				D30A309DFC9F14629FE8C285 /* ContrastSlider.swift in Sources */,
 				1889D0993E20C417052E3C05 /* ExposureSlider.swift in Sources */,
