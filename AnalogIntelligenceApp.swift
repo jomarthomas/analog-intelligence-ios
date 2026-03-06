@@ -8,10 +8,3 @@ struct AnalogIntelligenceApp: App {
         }
     }
 }
-
-struct RootView: View {
-    var body: some View {
-        Text("Hello, World!")
-            .padding()
-    }
-}
