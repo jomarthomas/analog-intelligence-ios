@@ -1,0 +1,579 @@
+//
+//  AiImageProcessingModule.swift
+//  ai-image-processing (local Expo module)
+//
+//  Negative → positive film-scanning engine for Analog Intelligence.
+//
+//  This is a faithful Core Image port of the proven legacy iOS pipeline:
+//    legacy-ios/Processing/Pipeline/ImageProcessor.swift       (orchestration)
+//    legacy-ios/Processing/Pipeline/NegativeInverter.swift     (inversion)
+//    legacy-ios/Processing/Pipeline/OrangeMaskEstimator.swift  (orange mask)
+//    legacy-ios/Processing/Pipeline/ColorCorrector.swift       (normalize + tone)
+//    legacy-ios/Processing/Pipeline/UserAdjustments.swift      (exposure/warmth/…)
+//    legacy-ios/Processing/Pipeline/ExportManager.swift        (encode/export)
+//    legacy-ios/Processing/Metrics/HistogramAnalyzer.swift     (analyzeHistogram)
+//
+//  The Core Image filter graph mirrors the legacy code 1:1; only the surface
+//  (Expo Modules API + file in / file out) differs. Each step below is
+//  annotated with the legacy file/function it was ported from.
+//
+
+import ExpoModulesCore
+import CoreImage
+import CoreImage.CIFilterBuiltins
+import ImageIO
+import UIKit
+
+// MARK: - Errors
+
+internal final class ImageNotFoundException: Exception {
+  override var reason: String { "Could not load the input image" }
+}
+
+internal final class ImageRenderFailedException: Exception {
+  override var reason: String { "Failed to render the processed image" }
+}
+
+internal final class ImageWriteFailedException: Exception {
+  override var reason: String { "Failed to write the processed image to disk" }
+}
+
+// MARK: - Parameters record (mirrors src/AiImageProcessing.types.ts ProcessParams)
+
+internal struct ProcessParams: Record {
+  @Field var exposure: Double = 0
+  @Field var warmth: Double = 0
+  @Field var contrast: Double = 0
+  @Field var mode: String = "color"          // "color" | "bw"
+  @Field var removeOrangeMask: Bool = true
+  @Field var sharpen: Double = 0
+  @Field var aiColor: Bool = false
+  @Field var aiDustRemoval: Bool = false
+  @Field var saturation: Double = 0
+  @Field var highlights: Double = 0
+  @Field var shadows: Double = 0
+  @Field var vibrance: Double = 0
+}
+
+// MARK: - Module
+
+public class AiImageProcessingModule: Module {
+  // Core Image context configured exactly as the legacy `ImageProcessor`:
+  // work in LINEAR sRGB (so colour math — divide-out mask, channel gains — is
+  // correct) and output sRGB. GPU renderer. See ImageProcessor.swift `ciContext`.
+  private let ciContext: CIContext = {
+    let options: [CIContextOption: Any] = [
+      .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB)!,
+      .outputColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+      .useSoftwareRenderer: false
+    ]
+    return CIContext(options: options)
+  }()
+
+  // A separate sRGB context for histogram pixel reads, matching
+  // HistogramAnalyzer.swift which renders into an sRGB bitmap.
+  private let srgbContext = CIContext(options: [
+    .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+  ])
+
+  public func definition() -> ModuleDefinition {
+    Name("AiImageProcessing")
+
+    // MARK: processNegative(inputUri, params) -> ProcessResult
+    AsyncFunction("processNegative") { (inputUri: String, params: ProcessParams) -> [String: Any] in
+      guard let input = self.loadCIImage(from: inputUri) else {
+        throw ImageNotFoundException()
+      }
+
+      let output = try self.runPipeline(input: input, params: params)
+
+      // Render to a CGImage and write a JPEG into the cache directory,
+      // mirroring ExportManager.exportImage (JPEG @ quality 0.95).
+      guard let cgImage = self.ciContext.createCGImage(output, from: output.extent) else {
+        throw ImageRenderFailedException()
+      }
+      let uri = try self.writeJPEG(cgImage: cgImage, quality: 0.95)
+
+      return [
+        "uri": uri,
+        "width": cgImage.width,
+        "height": cgImage.height
+      ]
+    }
+
+    // MARK: analyzeHistogram(uri) -> Histogram
+    AsyncFunction("analyzeHistogram") { (uri: String) -> [String: Any] in
+      guard let image = self.loadCIImage(from: uri),
+            let cgImage = self.srgbContext.createCGImage(image, from: image.extent) else {
+        throw ImageNotFoundException()
+      }
+      return self.computeHistogram(cgImage: cgImage)
+    }
+  }
+
+  // MARK: - Input loading
+
+  /// Accepts `file://` URIs, plain file paths, and asset/ph URLs that
+  /// `CIImage(contentsOf:)` understands. Orientation from EXIF is applied.
+  private func loadCIImage(from uri: String) -> CIImage? {
+    let url: URL
+    if uri.hasPrefix("file://") || uri.contains("://") {
+      guard let parsed = URL(string: uri) else { return nil }
+      url = parsed
+    } else {
+      url = URL(fileURLWithPath: uri)
+    }
+    return CIImage(contentsOf: url, options: [.applyOrientationProperty: true])
+  }
+
+  // MARK: - Pipeline (ImageProcessor.processNegative, steps 2–8)
+
+  private func runPipeline(input: CIImage, params: ProcessParams) throws -> CIImage {
+    let isColor = params.mode != "bw"
+    var image = input
+
+    // Step 2 — Convert to linear RGB.
+    // ImageProcessor.convertToLinearRGB uses CILinearToSRGBToneCurve.
+    image = linearize(image)
+
+    // Step 3 — Invert negative.
+    // NegativeInverter.invertColorNegative / invertBlackAndWhite → CIColorInvert.
+    image = invert(image)
+
+    // Step 4 — Estimate + remove orange mask (colour negatives only).
+    // OrangeMaskEstimator.removeOrangeMask.
+    if isColor && params.removeOrangeMask {
+      let mask = estimateOrangeMask(image: image)
+      image = removeOrangeMask(image: image, mask: mask)
+    }
+
+    // Step 5 — Normalize colour channels (gray-world).
+    // ColorCorrector.normalizeChannels.
+    image = normalizeChannels(image: image)
+
+    // Step 6 — Automatic tone correction (histogram CDF → levels + gamma).
+    // ColorCorrector.applyToneCorrection.
+    image = applyToneCorrection(image: image)
+
+    // Step 7 — User adjustments (exposure/highlights+shadows/contrast/warmth/
+    // saturation/vibrance), in the legacy order. UserAdjustments.applyAdjustments.
+    image = applyUserAdjustments(image: image, params: params)
+
+    // B&W: collapse to luminance after tone/colour work so any residual cast
+    // is removed (legacy treats B&W as colourless; the dedicated desaturate
+    // here is the cross-platform-equivalent of selecting FilmType.blackAndWhite).
+    if !isColor {
+      image = desaturate(image)
+    }
+
+    // Step 8 — Sharpen. ImageProcessor.applySharpen → CISharpenLuminance.
+    image = sharpen(image: image, amount: Float(params.sharpen))
+
+    // Convert back to sRGB for display/export.
+    // NOTE: ImageProcessor names this `convertToSRGB` but applies
+    // CISRGBToneCurveToLinear — we honour the *intent* (encode for sRGB output)
+    // which is also what the sRGB output colour space of `ciContext` enforces
+    // at render time. We mirror the legacy filter call for parity.
+    image = encodeForSRGB(image)
+
+    return image
+  }
+
+  // MARK: Step 2 — linearize
+
+  private func linearize(_ image: CIImage) -> CIImage {
+    let f = CIFilter(name: "CILinearToSRGBToneCurve")!
+    f.setValue(image, forKey: kCIInputImageKey)
+    return f.outputImage ?? image
+  }
+
+  private func encodeForSRGB(_ image: CIImage) -> CIImage {
+    let f = CIFilter(name: "CISRGBToneCurveToLinear")!
+    f.setValue(image, forKey: kCIInputImageKey)
+    return f.outputImage ?? image
+  }
+
+  // MARK: Step 3 — invert (NegativeInverter)
+
+  private func invert(_ image: CIImage) -> CIImage {
+    let f = CIFilter(name: "CIColorInvert")!
+    f.setValue(image, forKey: kCIInputImageKey)
+    return f.outputImage ?? image
+  }
+
+  // MARK: Step 4 — orange mask (OrangeMaskEstimator)
+
+  private struct OrangeMask {
+    var redDensity: Float
+    var greenDensity: Float
+    var blueDensity: Float
+    var strength: Float
+    static let `default` = OrangeMask(redDensity: 1.0, greenDensity: 0.65, blueDensity: 0.4, strength: 0.6)
+  }
+
+  /// Port of OrangeMaskEstimator.estimateOrangeMask:
+  /// downsample to 10%, read pixels, collect dark pixels (luma < 0.2 by
+  /// BT.601), average up to 100 darkest, derive per-channel densities.
+  private func estimateOrangeMask(image: CIImage) -> OrangeMask {
+    let extent = image.extent
+    guard extent.width > 0, extent.height > 0 else { return .default }
+
+    let scale: CGFloat = 0.1
+    let w = max(1, Int(extent.width * scale))
+    let h = max(1, Int(extent.height * scale))
+
+    // CILanczosScaleTransform — matches OrangeMaskEstimator.resizeImage.
+    let lanczos = CIFilter(name: "CILanczosScaleTransform")!
+    lanczos.setValue(image, forKey: kCIInputImageKey)
+    lanczos.setValue(scale, forKey: kCIInputScaleKey)
+    lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
+    let small = lanczos.outputImage ?? image
+
+    let bytesPerRow = w * 4
+    var pixels = [UInt8](repeating: 0, count: w * h * 4)
+    ciContext.render(
+      small,
+      toBitmap: &pixels,
+      rowBytes: bytesPerRow,
+      bounds: CGRect(x: 0, y: 0, width: w, height: h),
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    // Collect dark pixels (BT.601 luma < 0.2 → < 51/255), as in the legacy
+    // sampleDarkRegions threshold.
+    var dark: [(r: Float, g: Float, b: Float, lum: Float)] = []
+    for i in 0..<(w * h) {
+      let o = i * 4
+      let r = Float(pixels[o]); let g = Float(pixels[o + 1]); let b = Float(pixels[o + 2])
+      let lum = 0.299 * r + 0.587 * g + 0.114 * b
+      if lum < 51 {
+        dark.append((r / 255, g / 255, b / 255, lum))
+      }
+    }
+
+    guard dark.count >= 100 else { return .default }
+
+    // Average the 100 darkest, normalize densities relative to red (TECH SPEC
+    // §2.3 normalizes to red; redDensity = 1.0).
+    dark.sort { $0.lum < $1.lum }
+    let samples = dark.prefix(100)
+    let count = Float(samples.count)
+    let avgR = samples.map { $0.r }.reduce(0, +) / count
+    let avgG = samples.map { $0.g }.reduce(0, +) / count
+    let avgB = samples.map { $0.b }.reduce(0, +) / count
+
+    let safeR = max(avgR, 0.0001)
+    let range = max(avgR, avgG, avgB) - min(avgR, avgG, avgB)
+    return OrangeMask(
+      redDensity: 1.0,
+      greenDensity: avgG / safeR,
+      blueDensity: avgB / safeR,
+      strength: range > 0.1 ? min(1.0, range * 2.0) : 0.3
+    )
+  }
+
+  /// Port of OrangeMaskEstimator.removeMaskColor:
+  /// compensation = 1/density, normalize relative to the most-compensated
+  /// (blue) channel, apply via CIColorMatrix with a small negative bias.
+  private func removeOrangeMask(image: CIImage, mask: OrangeMask) -> CIImage {
+    let redComp = 1.0 / max(mask.redDensity, 0.1)
+    let greenComp = 1.0 / max(mask.greenDensity, 0.1)
+    let blueComp = 1.0 / max(mask.blueDensity, 0.1)
+
+    let norm = blueComp
+    let redGain = CGFloat(redComp / norm)
+    let greenGain = CGFloat(greenComp / norm)
+    let blueGain: CGFloat = 1.0
+
+    let m = CIFilter(name: "CIColorMatrix")!
+    m.setValue(image, forKey: kCIInputImageKey)
+    m.setValue(CIVector(x: redGain, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    m.setValue(CIVector(x: 0, y: greenGain, z: 0, w: 0), forKey: "inputGVector")
+    m.setValue(CIVector(x: 0, y: 0, z: blueGain, w: 0), forKey: "inputBVector")
+    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    let bias = -0.05 * CGFloat(mask.strength)
+    m.setValue(CIVector(x: bias, y: bias, z: 0, w: 0), forKey: "inputBiasVector")
+    return m.outputImage ?? image
+  }
+
+  // MARK: Step 5 — normalize channels (ColorCorrector, gray-world)
+
+  /// Port of ColorCorrector.normalizeChannels: CIAreaAverage to get the mean
+  /// colour, gray-world gains clamped to [0.5, 2.0], applied via CIColorMatrix.
+  private func normalizeChannels(image: CIImage) -> CIImage {
+    let extent = image.extent
+    let avg = CIFilter(name: "CIAreaAverage")!
+    avg.setValue(image, forKey: kCIInputImageKey)
+    avg.setValue(CIVector(cgRect: extent), forKey: kCIInputExtentKey)
+    guard let avgImage = avg.outputImage else { return image }
+
+    var bitmap = [UInt8](repeating: 0, count: 4)
+    ciContext.render(
+      avgImage,
+      toBitmap: &bitmap,
+      rowBytes: 4,
+      bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    let r = Float(bitmap[0]) / 255.0
+    let g = Float(bitmap[1]) / 255.0
+    let b = Float(bitmap[2]) / 255.0
+    let target = (r + g + b) / 3.0
+
+    func clampGain(_ mean: Float) -> CGFloat {
+      let gain = target / max(mean, 0.01)
+      return CGFloat(min(max(gain, 0.5), 2.0))
+    }
+    let redGain = clampGain(r)
+    let greenGain = clampGain(g)
+    let blueGain = clampGain(b)
+
+    let m = CIFilter(name: "CIColorMatrix")!
+    m.setValue(image, forKey: kCIInputImageKey)
+    m.setValue(CIVector(x: redGain, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    m.setValue(CIVector(x: 0, y: greenGain, z: 0, w: 0), forKey: "inputGVector")
+    m.setValue(CIVector(x: 0, y: 0, z: blueGain, w: 0), forKey: "inputBVector")
+    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
+    return m.outputImage ?? image
+  }
+
+  // MARK: Step 6 — automatic tone correction (ColorCorrector)
+
+  /// Port of ColorCorrector.calculateToneCurve + applyToneCurve:
+  /// build a luminance CDF from CIAreaHistogram, find 1%/99% black/white
+  /// points, then apply brightness=log2(1/range), contrast=1.1, gamma=1/0.5.
+  private func applyToneCorrection(image: CIImage) -> CIImage {
+    let extent = image.extent
+    let hist = CIFilter(name: "CIAreaHistogram")!
+    hist.setValue(image, forKey: kCIInputImageKey)
+    hist.setValue(CIVector(cgRect: extent), forKey: "inputExtent")
+    hist.setValue(256, forKey: "inputCount")
+    guard let histOut = hist.outputImage else { return image }
+
+    var data = [UInt8](repeating: 0, count: 256 * 4)
+    ciContext.render(
+      histOut,
+      toBitmap: &data,
+      rowBytes: 256 * 4,
+      bounds: histOut.extent,
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    // Luminance-weighted CDF over the histogram bins (BT.601, matching legacy).
+    var total: Float = 0
+    for bin in 0..<256 {
+      let r = Float(data[bin * 4]); let g = Float(data[bin * 4 + 1]); let b = Float(data[bin * 4 + 2])
+      total += 0.299 * r + 0.587 * g + 0.114 * b
+    }
+    var blackPoint: Float = 0
+    var whitePoint: Float = 1.0
+    var cumulative: Float = 0
+    let safeTotal = max(total, 1.0)
+    for bin in 0..<256 {
+      let r = Float(data[bin * 4]); let g = Float(data[bin * 4 + 1]); let b = Float(data[bin * 4 + 2])
+      cumulative += 0.299 * r + 0.587 * g + 0.114 * b
+      let cdf = cumulative / safeTotal
+      if cdf >= 0.01 && blackPoint == 0 { blackPoint = Float(bin) / 255.0 }
+      if cdf >= 0.99 { whitePoint = Float(bin) / 255.0; break }
+    }
+
+    let midPoint: Float = 0.5
+    let contrast: Float = 1.1
+    let inputRange = whitePoint - blackPoint
+    let exposure = log2(1.0 / max(inputRange, 0.1))
+
+    // Stage 1: brightness + contrast (CIColorControls), as in applyToneCurve.
+    let levels = CIFilter(name: "CIColorControls")!
+    levels.setValue(image, forKey: kCIInputImageKey)
+    levels.setValue(exposure, forKey: kCIInputBrightnessKey)
+    levels.setValue(contrast, forKey: kCIInputContrastKey)
+    guard let leveled = levels.outputImage else { return image }
+
+    // Stage 2: gamma (CIGammaAdjust), power = 1/midPoint.
+    let gammaF = CIFilter(name: "CIGammaAdjust")!
+    gammaF.setValue(leveled, forKey: kCIInputImageKey)
+    gammaF.setValue(1.0 / midPoint, forKey: "inputPower")
+    return gammaF.outputImage ?? leveled
+  }
+
+  // MARK: Step 7 — user adjustments (UserAdjustments.applyAdjustments order)
+
+  private func applyUserAdjustments(image: CIImage, params: ProcessParams) -> CIImage {
+    var result = image
+
+    // 1. Exposure — CIExposureAdjust, direct EV. (applyExposure)
+    if params.exposure != 0 {
+      let f = CIFilter(name: "CIExposureAdjust")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(Float(params.exposure), forKey: kCIInputEVKey)
+      result = f.outputImage ?? result
+    }
+
+    // 2. Highlights & shadows — CIHighlightShadowAdjust. (applyHighlightsShadows)
+    //    Legacy maps highlight amount = 1 - highlights, shadow amount = shadows.
+    if params.highlights != 0 || params.shadows != 0 {
+      let f = CIFilter(name: "CIHighlightShadowAdjust")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(1.0 - Float(params.highlights), forKey: "inputHighlightAmount")
+      f.setValue(Float(params.shadows), forKey: "inputShadowAmount")
+      result = f.outputImage ?? result
+    }
+
+    // 3. Contrast — CIColorControls, contrast = 1 + value. (applyContrast)
+    if params.contrast != 0 {
+      let f = CIFilter(name: "CIColorControls")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(1.0 + Float(params.contrast), forKey: kCIInputContrastKey)
+      result = f.outputImage ?? result
+    }
+
+    // 4. Warmth — CITemperatureAndTint, neutral 6500 + value*2000. (applyWarmth)
+    if params.warmth != 0 {
+      let f = CIFilter(name: "CITemperatureAndTint")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      let temperature = 6500.0 + (params.warmth * 2000.0)
+      f.setValue(CIVector(x: CGFloat(temperature), y: 0), forKey: "inputNeutral")
+      f.setValue(CIVector(x: 6500, y: 0), forKey: "inputTargetNeutral")
+      result = f.outputImage ?? result
+    }
+
+    // 5. Saturation — CIColorControls, saturation = 1 + value. (applySaturation)
+    if params.saturation != 0 {
+      let f = CIFilter(name: "CIColorControls")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(1.0 + Float(params.saturation), forKey: kCIInputSaturationKey)
+      result = f.outputImage ?? result
+    }
+
+    // 6. Vibrance — CIVibrance, direct amount. (applyVibrance)
+    if params.vibrance != 0 {
+      let f = CIFilter(name: "CIVibrance")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(Float(params.vibrance), forKey: "inputAmount")
+      result = f.outputImage ?? result
+    }
+
+    return result
+  }
+
+  // MARK: B&W desaturation
+
+  private func desaturate(_ image: CIImage) -> CIImage {
+    let f = CIFilter(name: "CIColorControls")!
+    f.setValue(image, forKey: kCIInputImageKey)
+    f.setValue(0.0, forKey: kCIInputSaturationKey)
+    return f.outputImage ?? image
+  }
+
+  // MARK: Step 8 — sharpen (ImageProcessor.applySharpen)
+
+  private func sharpen(image: CIImage, amount: Float) -> CIImage {
+    guard amount > 0 else { return image }
+    let f = CIFilter(name: "CISharpenLuminance")!
+    f.setValue(image, forKey: kCIInputImageKey)
+    f.setValue(amount, forKey: kCIInputSharpnessKey)
+    return f.outputImage ?? image
+  }
+
+  // MARK: - Histogram (HistogramAnalyzer)
+
+  /// Port of HistogramAnalyzer.generateHistogram + analyzeClipping.
+  /// 256 normalized bins per channel; luma uses BT.709 weights; clip = fraction
+  /// of luma in the bottom/top 5% of bins, returned as a percentage (0–100).
+  private func computeHistogram(cgImage: CGImage) -> [String: Any] {
+    let width = cgImage.width
+    let height = cgImage.height
+    let bins = 256
+
+    var r = [Double](repeating: 0, count: bins)
+    var g = [Double](repeating: 0, count: bins)
+    var b = [Double](repeating: 0, count: bins)
+    var luma = [Double](repeating: 0, count: bins)
+
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+          ) else {
+      return emptyHistogram()
+    }
+    ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+    guard let pixelData = ctx.data else { return emptyHistogram() }
+
+    let total = width * height
+    let pixels = pixelData.bindMemory(to: UInt8.self, capacity: total * 4)
+
+    for i in 0..<total {
+      let o = i * 4
+      let rv = Int(pixels[o]); let gv = Int(pixels[o + 1]); let bv = Int(pixels[o + 2])
+      r[min(rv * bins / 256, bins - 1)] += 1
+      g[min(gv * bins / 256, bins - 1)] += 1
+      b[min(bv * bins / 256, bins - 1)] += 1
+      // BT.709 luma (HistogramAnalyzer).
+      let l = 0.2126 * Double(rv) + 0.7152 * Double(gv) + 0.0722 * Double(bv)
+      luma[min(Int(l) * bins / 256, bins - 1)] += 1
+    }
+
+    let denom = Double(max(total, 1))
+    for i in 0..<bins {
+      r[i] /= denom; g[i] /= denom; b[i] /= denom; luma[i] /= denom
+    }
+
+    // Clipping: bottom/top 5% of bins (analyzeClipping).
+    let clipBins = max(1, bins / 20)
+    var shadow = 0.0
+    var highlight = 0.0
+    for i in 0..<clipBins { shadow += luma[i] }
+    for i in (bins - clipBins)..<bins { highlight += luma[i] }
+
+    return [
+      "r": r,
+      "g": g,
+      "b": b,
+      "luma": luma,
+      "shadowClipPct": shadow * 100.0,
+      "highlightClipPct": highlight * 100.0
+    ]
+  }
+
+  private func emptyHistogram() -> [String: Any] {
+    let zeros = [Double](repeating: 0, count: 256)
+    return [
+      "r": zeros, "g": zeros, "b": zeros, "luma": zeros,
+      "shadowClipPct": 0.0, "highlightClipPct": 0.0
+    ]
+  }
+
+  // MARK: - Output
+
+  /// Write a JPEG into the Expo cache directory and return its file:// URI,
+  /// mirroring how expo-image-manipulator emits saved files.
+  private func writeJPEG(cgImage: CGImage, quality: CGFloat) throws -> String {
+    let cacheURL = appContext?.config.cacheDirectory
+      ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+    let dir = cacheURL.appendingPathComponent("AiImageProcessing", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fileURL = dir.appendingPathComponent("\(UUID().uuidString).jpg")
+
+    let uiImage = UIImage(cgImage: cgImage)
+    guard let data = uiImage.jpegData(compressionQuality: quality) else {
+      throw ImageWriteFailedException()
+    }
+    do {
+      try data.write(to: fileURL, options: .atomic)
+    } catch {
+      throw ImageWriteFailedException()
+    }
+    return fileURL.absoluteString
+  }
+}

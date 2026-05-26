@@ -1,0 +1,10 @@
+{
+  "name": "ai-image-processing",
+  "version": "0.1.0",
+  "description": "Negative→positive film-scanning engine for Analog Intelligence (local Expo module).",
+  "main": "index.ts",
+  "private": true,
+  "license": "MIT",
+  "author": "Analog Intelligence",
+  "homepage": "https://github.com/analog-intelligence/analog-intelligence-ios"
+}

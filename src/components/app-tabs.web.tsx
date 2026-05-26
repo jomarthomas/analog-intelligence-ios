@@ -1,3 +1,13 @@
+/**
+ * app-tabs.web.tsx — legacy web tab wrapper.
+ *
+ * NOTE: This component is no longer used as the primary tab navigator.
+ * The Analog Intelligence tab shell is now driven by:
+ *   src/app/(tabs)/_layout.tsx  (expo-router <Tabs>)
+ *
+ * Kept for reference. Not imported by any active screen.
+ */
+
 import {
   Tabs,
   TabList,
@@ -6,10 +16,8 @@ import {
   TabTriggerSlotProps,
   TabListProps,
 } from 'expo-router/ui';
-import { SymbolView } from 'expo-symbols';
-import { Pressable, useColorScheme, View, StyleSheet } from 'react-native';
+import { Pressable, useColorScheme, View, StyleSheet, Text } from 'react-native';
 
-import { ExternalLink } from './external-link';
 import { ThemedText } from './themed-text';
 import { ThemedView } from './themed-view';
 
@@ -21,11 +29,17 @@ export default function AppTabs() {
       <TabSlot style={{ height: '100%' }} />
       <TabList asChild>
         <CustomTabList>
-          <TabTrigger name="home" href="/" asChild>
-            <TabButton>Home</TabButton>
+          <TabTrigger name="scan" href="/(tabs)/scan" asChild>
+            <TabButton>Scan</TabButton>
           </TabTrigger>
-          <TabTrigger name="explore" href="/explore" asChild>
-            <TabButton>Explore</TabButton>
+          <TabTrigger name="gallery" href="/(tabs)/gallery" asChild>
+            <TabButton>Gallery</TabButton>
+          </TabTrigger>
+          <TabTrigger name="insights" href="/(tabs)/insights" asChild>
+            <TabButton>Insights</TabButton>
+          </TabTrigger>
+          <TabTrigger name="settings" href="/(tabs)/settings" asChild>
+            <TabButton>Settings</TabButton>
           </TabTrigger>
         </CustomTabList>
       </TabList>
@@ -49,27 +63,15 @@ export function TabButton({ children, isFocused, ...props }: TabTriggerSlotProps
 
 export function CustomTabList(props: TabListProps) {
   const scheme = useColorScheme();
-  const colors = Colors[scheme === 'unspecified' ? 'light' : scheme];
+  const colors = Colors[scheme === 'unspecified' ? 'dark' : (scheme ?? 'dark')];
 
   return (
     <View {...props} style={styles.tabListContainer}>
       <ThemedView type="backgroundElement" style={styles.innerContainer}>
-        <ThemedText type="smallBold" style={styles.brandText}>
-          Expo Starter
-        </ThemedText>
-
+        <Text style={[styles.brandText, { color: colors.accent }]}>
+          Analog Intelligence™
+        </Text>
         {props.children}
-
-        <ExternalLink href="https://docs.expo.dev" asChild>
-          <Pressable style={styles.externalPressable}>
-            <ThemedText type="link">Docs</ThemedText>
-            <SymbolView
-              tintColor={colors.text}
-              name={{ ios: 'arrow.up.right.square', web: 'link' }}
-              size={12}
-            />
-          </Pressable>
-        </ExternalLink>
       </ThemedView>
     </View>
   );
@@ -96,6 +98,8 @@ const styles = StyleSheet.create({
   },
   brandText: {
     marginRight: 'auto',
+    fontSize: 14,
+    fontWeight: '600',
   },
   pressed: {
     opacity: 0.7,
@@ -104,12 +108,5 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.one,
     paddingHorizontal: Spacing.three,
     borderRadius: Spacing.three,
-  },
-  externalPressable: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: Spacing.one,
-    marginLeft: Spacing.three,
   },
 });

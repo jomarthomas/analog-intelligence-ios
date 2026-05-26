@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.aiimageprocessing'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.aiimageprocessing"
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+// The engine uses only framework Bitmap + ColorMatrix + per-pixel operations,
+// so no third-party native dependencies are required. expo-module-gradle-plugin
+// wires Kotlin, ExpoModulesCore and the minSdkVersion from the host app.
+dependencies {}
