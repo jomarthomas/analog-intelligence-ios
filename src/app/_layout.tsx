@@ -9,11 +9,14 @@
  *   - Animated splash overlay (kept from scaffold)
  */
 
+import { useEffect } from 'react';
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
+import { initPurchases } from '@/monetization';
+import { useGalleryStore } from '@/state/galleryStore';
 
 /**
  * Dark-first: we always prefer the dark navigation theme for Analog Intelligence,
@@ -27,6 +30,15 @@ function useNavigationTheme() {
 
 export default function RootLayout() {
   const navTheme = useNavigationTheme();
+
+  // One-time app bootstrap: initialise RevenueCat (Pro entitlement sync) and
+  // load the persisted gallery (sessions + images) into the zustand store.
+  // Both are safe to call when their native modules are unconfigured — they
+  // log a warning and resolve gracefully (see purchases.ts / galleryStore.ts).
+  useEffect(() => {
+    void initPurchases();
+    void useGalleryStore.getState().loadGallery();
+  }, []);
 
   return (
     <ThemeProvider value={navTheme}>
@@ -45,6 +57,15 @@ export default function RootLayout() {
             headerShown: false,
             // Prevent accidental swipe-down dismissal during active editing
             gestureEnabled: true,
+          }}
+        />
+
+        {/* Gallery detail — full-frame view pushed from the gallery grid */}
+        <Stack.Screen
+          name="gallery/[id]"
+          options={{
+            headerShown: false,
+            presentation: 'card',
           }}
         />
       </Stack>

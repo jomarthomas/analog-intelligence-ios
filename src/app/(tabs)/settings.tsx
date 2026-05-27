@@ -1,130 +1,198 @@
 /**
  * Settings tab — app preferences and account management.
  *
- * Intended layout:
- *   - Pro upgrade banner (free users)
- *   - Sections: Export, Camera, Processing, About
- *   - Export format (JPEG / TIFF / DNG)
- *   - Default resolution
- *   - Camera controls defaults (ISO, WB)
- *   - Restore purchases
- *   - App version + build
+ * Wiring (capstone integration):
+ *   - Pro section: <ProUpgradeBanner> (free) or an "active" state, plus a
+ *     "Restore Purchases" row that calls useProStatus().restore().
+ *   - Export: default format (cycles jpeg/heic/png/tiff) + "save to Photos
+ *     after processing" toggle — persisted via setPreference (@/storage).
+ *   - Camera: RAW capture / grid overlay / live histogram toggles.
+ *   - Processing: auto orange-mask correction + Pro AI default toggles.
+ *   - Storage: usage from getStorageStats(); About: app version.
  *
- * TODO(integration): Monetization agent — replace Pro upgrade banner stub
- *   with <ProUpgradeBanner> from src/monetization/. Wire up
- *   "Restore Purchases" row to RevenueCat via src/monetization/purchases.ts.
- *
- * TODO(integration): Storage agent — read/write user preferences via
- *   react-native-mmkv store from src/storage/prefs.ts.
+ * Preferences are MMKV-backed (synchronous). We mirror them into local state
+ * on mount so toggles re-render immediately, and write through setPreference.
  */
 
-import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import Constants from 'expo-constants';
 
 import { useTheme } from '@/hooks/use-theme';
 import { Card } from '@/theme/card';
 import { ListRow } from '@/theme/list-row';
-import { ProBadge } from '@/theme/pro-badge';
 import { SectionHeader } from '@/theme/section-header';
 import { Screen } from '@/theme/screen';
-import { FontSize, FontWeight, Palette, Radius, Spacing } from '@/constants/theme';
+import { FontSize, FontWeight, Spacing } from '@/constants/theme';
+
+import { ProUpgradeBanner, useProStatus } from '@/monetization';
+import {
+  getPreferences,
+  getStorageStats,
+  setPreference,
+  type ExportFormat,
+  type StorageStats,
+  type UserPreferences,
+} from '@/storage';
+import { SettingsToggleRow } from '@/features/settings';
+
+const EXPORT_FORMATS: ExportFormat[] = ['jpeg', 'heic', 'png', 'tiff'];
+
+function nextExportFormat(current: ExportFormat): ExportFormat {
+  const idx = EXPORT_FORMATS.indexOf(current);
+  return EXPORT_FORMATS[(idx + 1) % EXPORT_FORMATS.length];
+}
 
 export default function SettingsScreen() {
   const theme = useTheme();
+  const { isPro, restore, isLoading } = useProStatus();
+
+  // Mirror MMKV prefs in local state for instant re-render on toggle.
+  const [prefs, setPrefs] = useState<UserPreferences>(() => getPreferences());
+  const [stats, setStats] = useState<StorageStats | null>(null);
+
+  // Refresh storage stats on mount (async; SQLite + file sizes).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await getStorageStats();
+        if (!cancelled) setStats(s);
+      } catch {
+        // Non-fatal — leave stats null (row shows a dash).
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Generic helper: write a boolean pref + update local mirror.
+  // setPreference exposes per-key overloads; for the boolean keys they all
+  // accept a boolean, so we view it through a boolean-key function type rather
+  // than matching a single literal overload at this generic call site.
+  const setBool = useCallback(
+    (key: BoolPrefKey, value: boolean) => {
+      // Write through to MMKV, then re-read the full snapshot so local state
+      // reflects the persisted truth (avoids a computed-key spread over the
+      // boolean-key union, which the checker rejects as a literal key).
+      setBooleanPreference(key, value);
+      setPrefs(getPreferences());
+    },
+    [],
+  );
+
+  const cycleExportFormat = useCallback(() => {
+    const next = nextExportFormat(prefs.defaultExportFormat);
+    setPreference('defaultExportFormat', next);
+    setPrefs((p) => ({ ...p, defaultExportFormat: next }));
+  }, [prefs.defaultExportFormat]);
+
+  const handleRestore = useCallback(async () => {
+    const result = await restore();
+    if (result.success) {
+      Alert.alert(
+        result.isPro ? 'Purchases restored' : 'No purchases found',
+        result.isPro
+          ? 'Your Pro features are active again.'
+          : 'No previous Pro purchase was found on this account.',
+      );
+    } else {
+      Alert.alert('Restore failed', result.error);
+    }
+  }, [restore]);
+
+  const appVersion = Constants.expoConfig?.version ?? '1.0.0';
 
   return (
-    <Screen edges={['top', 'left', 'right']} style={{ backgroundColor: theme.background }}>
+    <Screen edges={['top', 'left', 'right']}>
       <ScrollView
-        style={{ flex: 1 }}
+        style={styles.flex}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}>
-
-        {/* Page title */}
+        {/* Title */}
         <View style={styles.headerRow}>
           <Text style={[styles.pageTitle, { color: theme.text }]}>Settings</Text>
         </View>
 
-        {/* TODO(integration): Monetization — replace this stub with <ProUpgradeBanner /> */}
-        <Card padding="md" elevated style={styles.proBanner}>
-          <View style={styles.proBannerInner}>
-            <View style={styles.proBannerText}>
-              <Text style={[styles.proBannerTitle, { color: theme.text }]}>
-                Unlock Analog Intelligence Pro
-              </Text>
-              <Text style={[styles.proBannerSub, { color: theme.textSecondary }]}>
-                Full resolution · AI processing · Insights · No ads
-              </Text>
-            </View>
-            {/* Amber accent strip */}
-            <View style={[styles.proBannerAccent, { backgroundColor: theme.accent }]}>
-              <Text style={styles.proBannerPrice}>$9.99</Text>
-            </View>
+        {/* Pro section */}
+        {isPro ? (
+          <Card padding="md" elevated style={styles.proActiveCard}>
+            <Text style={[styles.proActiveTitle, { color: theme.accent }]}>
+              Analog Intelligence Pro
+            </Text>
+            <Text style={[styles.proActiveSub, { color: theme.textSecondary }]}>
+              Full resolution · AI processing · Insights · No ads — all unlocked.
+            </Text>
+          </Card>
+        ) : (
+          <View style={styles.bannerWrap}>
+            <ProUpgradeBanner dismissible={false} />
           </View>
-        </Card>
+        )}
 
         {/* Export section */}
         <SectionHeader title="Export" />
         <Card padding="none">
           <ListRow
             label="Format"
-            value="JPEG"
+            value={prefs.defaultExportFormat.toUpperCase()}
             showChevron
-            onPress={() => {
-              /* TODO(integration): open format picker */
-            }}
+            onPress={cycleExportFormat}
           />
-          <ListRow
-            label="Resolution"
-            value="Full"
-            right={<ProBadge />}
-            showChevron
+          <SettingsToggleRow
+            label="Save to Photos after processing"
+            value={prefs.saveToPhotosAfterProcessing}
+            onValueChange={(v) => setBool('saveToPhotosAfterProcessing', v)}
             showSeparator={false}
-            onPress={() => {
-              /* TODO(integration): Pro gate + picker */
-            }}
           />
         </Card>
 
         {/* Camera section */}
         <SectionHeader title="Camera" />
         <Card padding="none">
-          <ListRow
-            label="Default ISO"
-            value="Auto"
-            showChevron
-            onPress={() => {
-              /* TODO(integration): Camera agent settings */
-            }}
+          <SettingsToggleRow
+            label="Capture RAW (DNG)"
+            description="Where the device supports it."
+            value={prefs.enableRawCapture}
+            onValueChange={(v) => setBool('enableRawCapture', v)}
           />
-          <ListRow
-            label="White Balance"
-            value="Auto"
-            showChevron
+          <SettingsToggleRow
+            label="Show frame guide"
+            value={prefs.showGridOverlay}
+            onValueChange={(v) => setBool('showGridOverlay', v)}
+          />
+          <SettingsToggleRow
+            label="Live histogram"
+            value={prefs.showHistogram}
+            onValueChange={(v) => setBool('showHistogram', v)}
             showSeparator={false}
-            onPress={() => {
-              /* TODO(integration): Camera agent settings */
-            }}
           />
         </Card>
 
         {/* Processing section */}
         <SectionHeader title="Processing" />
         <Card padding="none">
-          <ListRow
-            label="AI Color Reconstruction"
-            right={<ProBadge />}
-            showChevron
-            onPress={() => {
-              /* TODO(integration): Pipeline agent + Pro gate */
-            }}
+          <SettingsToggleRow
+            label="Auto orange-mask correction"
+            description="Remove the orange film base on colour negatives."
+            value={prefs.autoApplyOrangeMaskCorrection}
+            onValueChange={(v) => setBool('autoApplyOrangeMaskCorrection', v)}
           />
-          <ListRow
+          <SettingsToggleRow
+            label="AI Color Reconstruction"
+            pro
+            disabled={!isPro}
+            value={prefs.enableAIColorReconstruction}
+            onValueChange={(v) => setBool('enableAIColorReconstruction', v)}
+          />
+          <SettingsToggleRow
             label="AI Dust Removal"
-            right={<ProBadge />}
-            showChevron
+            pro
+            disabled={!isPro}
+            value={prefs.enableAIDustRemoval}
+            onValueChange={(v) => setBool('enableAIDustRemoval', v)}
             showSeparator={false}
-            onPress={() => {
-              /* TODO(integration): Pipeline agent + Pro gate */
-            }}
           />
         </Card>
 
@@ -133,37 +201,30 @@ export default function SettingsScreen() {
         <Card padding="none">
           <ListRow
             label="Restore Purchases"
+            value={isLoading ? 'Checking…' : undefined}
             showChevron
-            onPress={() => {
-              /* TODO(integration): Monetization agent — RevenueCat restorePurchases() */
-            }}
+            onPress={() => void handleRestore()}
           />
           <ListRow
-            label="Privacy Policy"
-            showChevron
+            label="Storage used"
+            value={stats ? stats.formattedSize : '—'}
             showSeparator={false}
-            onPress={() => {
-              /* TODO(integration): open external link */
-            }}
           />
         </Card>
 
-        {/* About */}
+        {/* About section */}
         <SectionHeader title="About" />
         <Card padding="none">
           <ListRow
-            label="Version"
-            value="1.0.0 (1)"
-            showSeparator={false}
+            label="Scans"
+            value={stats ? `${stats.totalImages} (${stats.processedImages} processed)` : '—'}
           />
+          <ListRow label="Version" value={appVersion} showSeparator={false} />
         </Card>
 
         <View style={styles.footer}>
           <Text style={[styles.footerText, { color: theme.textSecondary }]}>
             Analog Intelligence™
-          </Text>
-          <Text style={[styles.footerText, { color: theme.textSecondary }]}>
-            Wired up next — feature agents mount here
           </Text>
         </View>
       </ScrollView>
@@ -171,7 +232,27 @@ export default function SettingsScreen() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Boolean preference keys (compile-time constrained to UserPreferences bools)
+// ---------------------------------------------------------------------------
+
+type BoolPrefKey = {
+  [K in keyof UserPreferences]: UserPreferences[K] extends boolean ? K : never;
+}[keyof UserPreferences];
+
+/**
+ * A boolean-key view of setPreference. The exported setPreference is a set of
+ * per-key overloads; every boolean key accepts a boolean, so this typed alias
+ * lets the generic setBool helper call through without picking one literal
+ * overload. No behavioural change — it forwards to the same implementation.
+ */
+const setBooleanPreference: (key: BoolPrefKey, value: boolean) => void =
+  setPreference as (key: BoolPrefKey, value: boolean) => void;
+
 const styles = StyleSheet.create({
+  flex: {
+    flex: 1,
+  },
   content: {
     paddingHorizontal: Spacing.md,
     paddingBottom: Spacing.xxl,
@@ -185,40 +266,26 @@ const styles = StyleSheet.create({
     fontWeight: FontWeight.bold,
     letterSpacing: -0.5,
   },
-  proBanner: {
+  bannerWrap: {
     marginTop: Spacing.sm,
-    marginBottom: Spacing.sm,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
-  proBannerInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.md,
-  },
-  proBannerText: {
-    flex: 1,
+  proActiveCard: {
+    marginTop: Spacing.sm,
     gap: Spacing.xs,
   },
-  proBannerTitle: {
-    fontSize: FontSize.md,
-    fontWeight: FontWeight.semibold,
-  },
-  proBannerSub: {
-    fontSize: FontSize.sm,
-  },
-  proBannerAccent: {
-    borderRadius: Radius.md,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-  },
-  proBannerPrice: {
+  proActiveTitle: {
     fontSize: FontSize.md,
     fontWeight: FontWeight.bold,
-    color: Palette.black,
+  },
+  proActiveSub: {
+    fontSize: FontSize.sm,
+    lineHeight: FontSize.sm * 1.4,
   },
   footer: {
     marginTop: Spacing.xl,
     alignItems: 'center',
-    gap: Spacing.xs,
   },
   footerText: {
     fontSize: FontSize.sm,
