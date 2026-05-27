@@ -14,11 +14,19 @@
  *   - "Done": await pipeline.commit() → reload gallery → replace to gallery.
  *     pipeline.fallbackNotice (Android DNG) and pipeline.error are surfaced.
  *
+ * Task #13 additions:
+ *   - LIVE HISTOGRAM: analyzeHistogram() is called on previewUri (debounced
+ *     ~400 ms, race-guarded). The Insights <Histogram> component renders
+ *     compactly below the preview. Loading / empty states are handled.
+ *   - AUTO CROP: if the Scan screen detected a frame boundary and the user
+ *     approved it, cropRect is passed as a JSON query param and applied to
+ *     the initial pipeline params.
+ *
  * Algorithm parity: legacy-ios/docs/PRODUCT_UI_SPEC.md + DESIGN_UPDATES.md
  *   (three orange sliders + Pro AI toggles + Done → Gallery).
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
@@ -36,34 +44,162 @@ import {
   fromSnapshot,
   usePipeline,
 } from '@/processing';
+import type { FullProcessParams } from '@/processing';
 import { ProGate } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
 
 import { AdjustPreview, AdjustSlider, AIToggleRow } from '@/features/adjust';
+import { Histogram } from '@/insights';
+import { analyzeHistogram } from '../../../modules/ai-image-processing';
+import type { Histogram as HistogramData } from '../../../modules/ai-image-processing';
+import type { AggregateHistogram } from '@/insights';
+
+// ---------------------------------------------------------------------------
+// Histogram adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert the native Histogram (with shadowClipPct / highlightClipPct) into
+ * the AggregateHistogram shape expected by the <Histogram> UI component.
+ * The extra clipping fields are dropped — they are only used by ClippingCard.
+ */
+function toAggregateHistogram(h: HistogramData): AggregateHistogram {
+  return { r: h.r, g: h.g, b: h.b, luma: h.luma };
+}
+
+// ---------------------------------------------------------------------------
+// useLiveHistogram — debounced, race-guarded
+// ---------------------------------------------------------------------------
+
+const HISTOGRAM_DEBOUNCE_MS = 400;
+
+/**
+ * Analyzes the histogram of the given URI with a 400 ms debounce.
+ * Returns null while loading and the AggregateHistogram when ready.
+ * Guards against races: if the URI changes before the promise resolves,
+ * the stale result is discarded.
+ */
+function useLiveHistogram(uri: string | undefined): {
+  histogram: AggregateHistogram | null;
+  isLoading: boolean;
+} {
+  const [histogram, setHistogram] = useState<AggregateHistogram | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track the URI that produced the current in-flight request.
+  const inflightUriRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!uri) {
+      setHistogram(null);
+      setIsLoading(false);
+      return;
+    }
+
+    // Clear any pending debounce timer.
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+    }
+
+    setIsLoading(true);
+
+    timerRef.current = setTimeout(() => {
+      inflightUriRef.current = uri;
+      analyzeHistogram(uri)
+        .then((result) => {
+          // Discard stale results if the URI changed while we were waiting.
+          if (inflightUriRef.current !== uri) return;
+          setHistogram(toAggregateHistogram(result));
+          setIsLoading(false);
+        })
+        .catch(() => {
+          if (inflightUriRef.current !== uri) return;
+          setHistogram(null);
+          setIsLoading(false);
+        });
+    }, HISTOGRAM_DEBOUNCE_MS);
+
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, [uri]);
+
+  return { histogram, isLoading };
+}
+
+// ---------------------------------------------------------------------------
+// Crop-rect param parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the JSON-encoded cropRect passed as a route query param from the
+ * Scan screen after the user approves a detected frame boundary.
+ * Returns null if the param is absent or malformed.
+ */
+function parseCropRectParam(
+  raw: string | string[] | undefined,
+): FullProcessParams['cropRect'] | null {
+  if (!raw || Array.isArray(raw)) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'x' in parsed &&
+      'y' in parsed &&
+      'width' in parsed &&
+      'height' in parsed
+    ) {
+      const r = parsed as { x: unknown; y: unknown; width: unknown; height: unknown };
+      if (
+        typeof r.x === 'number' &&
+        typeof r.y === 'number' &&
+        typeof r.width === 'number' &&
+        typeof r.height === 'number'
+      ) {
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      }
+    }
+  } catch {
+    // malformed JSON — ignore
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Route entry point
+// ---------------------------------------------------------------------------
 
 export default function AdjustScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, cropRect: cropRectParam } = useLocalSearchParams<{
+    id: string;
+    cropRect?: string;
+  }>();
   const router = useRouter();
 
-  // The image was persisted by the Scan screen before navigation, so it is
-  // already present in the gallery store. Selecting by id keeps us in sync if
-  // the store reloads (e.g. after a background refresh).
   const image = useGalleryStore((s) => s.allImages.find((i) => i.id === id));
   const loadGallery = useGalleryStore((s) => s.loadGallery);
 
-  // Image not found (stale deep link / deleted while navigating): bail out
-  // gracefully back to the gallery rather than rendering a broken pipeline.
   if (image === undefined) {
     return <ImageMissing onBack={() => router.replace('/(tabs)/gallery')} />;
   }
+
+  // If the Scan screen passed an approved cropRect, merge it into the initial params.
+  const detectedCropRect = parseCropRectParam(cropRectParam);
+  const baseParams = fromSnapshot(image.processParams) ?? DEFAULT_FULL_PROCESS_PARAMS;
+  const initialParams: FullProcessParams = detectedCropRect
+    ? { ...baseParams, cropRect: detectedCropRect }
+    : baseParams;
 
   return (
     <AdjustScreenBody
       imageId={image.id}
       originalUri={image.originalUri}
-      initialParams={fromSnapshot(image.processParams) ?? DEFAULT_FULL_PROCESS_PARAMS}
+      initialParams={initialParams}
       onCommitted={async () => {
-        // Refresh the store so the gallery shows the freshly processed frame.
         await loadGallery();
         router.replace('/(tabs)/gallery');
       }}
@@ -96,6 +232,9 @@ function AdjustScreenBody({
   const pipeline = usePipeline({ imageId, originalUri, initialParams });
   const [isCommitting, setIsCommitting] = useState(false);
 
+  // Live histogram on the current preview URI (debounced, race-guarded).
+  const { histogram, isLoading: isHistogramLoading } = useLiveHistogram(pipeline.previewUri);
+
   // Surface hard pipeline errors as an alert (preview + commit failures).
   useEffect(() => {
     if (pipeline.error !== null) {
@@ -121,7 +260,6 @@ function AdjustScreenBody({
       await onCommitted();
     } catch {
       // commit() already set pipeline.error; the effect above shows the alert.
-      // Stay on the screen so the user can retry.
     } finally {
       setIsCommitting(false);
     }
@@ -154,6 +292,32 @@ function AdjustScreenBody({
           originalUri={originalUri}
           isProcessing={pipeline.isProcessing}
         />
+
+        {/* Live histogram — shown below the preview when data is available.
+            Uses the Insights <Histogram> component (compact height 80). */}
+        <View style={styles.histogramContainer}>
+          {histogram !== null ? (
+            <Histogram
+              histogram={histogram}
+              height={80}
+              style={styles.histogramChart}
+            />
+          ) : isHistogramLoading ? (
+            <View style={[styles.histogramPlaceholder, { backgroundColor: theme.backgroundCard }]}>
+              <Text style={[styles.histogramPlaceholderText, { color: theme.textSecondary }]}>
+                Analysing…
+              </Text>
+            </View>
+          ) : (
+            // No preview yet — show a subtle placeholder so the layout
+            // doesn't shift when the histogram arrives.
+            <View style={[styles.histogramPlaceholder, { backgroundColor: theme.backgroundCard }]}>
+              <Text style={[styles.histogramPlaceholderText, { color: theme.textSecondary }]}>
+                Histogram
+              </Text>
+            </View>
+          )}
+        </View>
 
         {/* Adjustments */}
         <SectionHeader title="Adjustments" />
@@ -261,6 +425,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     paddingTop: Spacing.md,
     paddingBottom: Spacing.xxl,
+  },
+  histogramContainer: {
+    marginTop: Spacing.sm,
+    marginBottom: Spacing.xs,
+  },
+  histogramChart: {
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  histogramPlaceholder: {
+    height: 80,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  histogramPlaceholderText: {
+    fontSize: FontSize.sm,
   },
   card: {
     gap: Spacing.sm,

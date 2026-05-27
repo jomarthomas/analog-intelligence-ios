@@ -35,6 +35,7 @@ import {
   type UserPreferences,
 } from '@/storage';
 import { SettingsToggleRow } from '@/features/settings';
+import { useDockStore } from '@/state/useDockStore';
 
 const EXPORT_FORMATS: ExportFormat[] = ['jpeg', 'heic', 'png', 'tiff'];
 
@@ -50,6 +51,12 @@ export default function SettingsScreen() {
   // Mirror MMKV prefs in local state for instant re-render on toggle.
   const [prefs, setPrefs] = useState<UserPreferences>(() => getPreferences());
   const [stats, setStats] = useState<StorageStats | null>(null);
+
+  // Dock store for the Developer → Simulate Dock row.
+  const dockStatus = useDockStore((s) => s.status);
+  const dockConnect = useDockStore((s) => s.connect);
+  const dockDisconnect = useDockStore((s) => s.disconnect);
+  const isDockConnected = dockStatus.state !== 'idle';
 
   // Refresh storage stats on mount (async; SQLite + file sizes).
   useEffect(() => {
@@ -101,6 +108,29 @@ export default function SettingsScreen() {
       Alert.alert('Restore failed', result.error);
     }
   }, [restore]);
+
+  const handleSimulateDock = useCallback(async () => {
+    if (isDockConnected) {
+      try {
+        await dockDisconnect();
+      } catch {
+        // Disconnect errors are non-fatal — mirror the UI toggle state anyway.
+      }
+    } else {
+      try {
+        await dockConnect({ simulation: true });
+        Alert.alert(
+          'Simulated dock connected',
+          'The dock simulation is now active. Go to the Scan tab to use it.',
+        );
+      } catch (err) {
+        Alert.alert(
+          'Simulate dock failed',
+          err instanceof Error ? err.message : 'Could not start dock simulation.',
+        );
+      }
+    }
+  }, [isDockConnected, dockConnect, dockDisconnect]);
 
   const appVersion = Constants.expoConfig?.version ?? '1.0.0';
 
@@ -220,6 +250,22 @@ export default function SettingsScreen() {
             value={stats ? `${stats.totalImages} (${stats.processedImages} processed)` : '—'}
           />
           <ListRow label="Version" value={appVersion} showSeparator={false} />
+        </Card>
+
+        {/* Developer section — always visible; docked state is togglable */}
+        <SectionHeader title="Developer" />
+        <Card padding="none">
+          <SettingsToggleRow
+            label="Simulate Dock"
+            description={
+              isDockConnected
+                ? `Connected (${dockStatus.isSimulation ? 'sim' : 'real'}) · ${dockStatus.state}`
+                : 'Activates the BLE dock simulation on the Scan tab.'
+            }
+            value={isDockConnected}
+            onValueChange={() => void handleSimulateDock()}
+            showSeparator={false}
+          />
         </Card>
 
         <View style={styles.footer}>
