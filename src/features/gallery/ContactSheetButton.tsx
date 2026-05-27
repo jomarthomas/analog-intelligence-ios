@@ -3,27 +3,39 @@
  *
  * Pro-gated "Contact Sheet" action for the Gallery.
  *
- * A true contact sheet composites every frame of a roll into a single
- * grid image. expo-image-manipulator cannot composite multiple images, and no
- * native/Skia compositor is wired into modules/ yet, so this is an MVP STUB:
- * it is gated behind <ProGate> and, when tapped, explains the feature and
- * offers a pragmatic stand-in (export all processed frames to Photos).
+ * Implements a real Skia grid composite:
+ *   1. Gather thumbnail URIs (or processed URIs as fallback) from the gallery.
+ *   2. Call buildContactSheet() from the Skia offscreen compositor — draws all
+ *      frames into a grid on a CPU-raster SkSurface, snapshots to JPEG.
+ *   3. Offer to share the sheet (expo-sharing) or save to Photos (expo-media-library).
  *
- * TODO(P0 / orchestrator): implement the real grid composite — render the
- * roll's thumbnails into a @shopify/react-native-skia canvas (already a
- * dependency), snapshot it, and save/share the resulting sheet.
+ * The ProGate wrapper remains: free users see a compact upgrade prompt.
  */
 
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import * as MediaLibrary from 'expo-media-library';
+import * as Sharing from 'expo-sharing';
 
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, FontWeight, Radius, Spacing } from '@/constants/theme';
 import { ProBadge } from '@/theme/pro-badge';
 import { ProGate } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
+import { buildContactSheet } from '@/lib/skiaOffscreenCompositor';
 
-import { exportImagesToPhotos } from './exportImage';
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const COLUMNS = 3;
+const CELL_WIDTH = 400;
+const CELL_HEIGHT = 300;
+const PADDING = 16;
+
+// ---------------------------------------------------------------------------
+// Inner component (only rendered when Pro is active)
+// ---------------------------------------------------------------------------
 
 function ContactSheetInner() {
   const theme = useTheme();
@@ -31,35 +43,80 @@ function ContactSheetInner() {
   const [busy, setBusy] = useState(false);
 
   const handlePress = useCallback(() => {
-    const processed = displayedImages.filter((img) => img.isProcessed);
+    // Collect the best available URI for each image (thumbnail first for speed,
+    // then processedUri, then originalUri). Skip images with no URI at all.
+    const uris: string[] = displayedImages
+      .map((img) => img.thumbnailUri ?? img.processedUri ?? img.originalUri)
+      .filter((uri): uri is string => typeof uri === 'string');
+
+    if (uris.length === 0) {
+      Alert.alert('No images', 'There are no images to include in the contact sheet.');
+      return;
+    }
+
     Alert.alert(
       'Contact Sheet',
-      'Grid composites are coming soon. For now you can export every processed frame in this roll to your Photos library.',
+      `Create a contact sheet from ${uris.length} frame${uris.length === 1 ? '' : 's'}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: `Export ${processed.length}`,
+          text: 'Save to Photos',
           onPress: () => {
-            void (async () => {
-              setBusy(true);
-              try {
-                const { saved, failed, firstError } = await exportImagesToPhotos(processed);
-                if (saved > 0 && failed === 0) {
-                  Alert.alert('Exported', `Saved ${saved} frames to your library.`);
-                } else if (saved > 0) {
-                  Alert.alert('Partly exported', `Saved ${saved}, ${failed} failed.`);
-                } else {
-                  Alert.alert('Export failed', firstError ?? 'No frames were saved.');
-                }
-              } finally {
-                setBusy(false);
-              }
-            })();
+            void handleGenerate(uris, 'photos');
+          },
+        },
+        {
+          text: 'Share',
+          onPress: () => {
+            void handleGenerate(uris, 'share');
           },
         },
       ],
     );
   }, [displayedImages]);
+
+  const handleGenerate = useCallback(
+    async (uris: string[], destination: 'photos' | 'share') => {
+      setBusy(true);
+      try {
+        const { uri } = await buildContactSheet(uris, {
+          columns: COLUMNS,
+          cellWidth: CELL_WIDTH,
+          cellHeight: CELL_HEIGHT,
+          padding: PADDING,
+          backgroundColor: '#141418',
+          showFrameNumbers: true,
+          jpegQuality: 90,
+        });
+
+        if (destination === 'photos') {
+          const perm = await MediaLibrary.requestPermissionsAsync(true);
+          if (!perm.granted) {
+            Alert.alert(
+              'Permission required',
+              'Photos access is needed to save the contact sheet.',
+            );
+            return;
+          }
+          await MediaLibrary.saveToLibraryAsync(uri);
+          Alert.alert('Saved', 'Contact sheet saved to your Photos library.');
+        } else {
+          const available = await Sharing.isAvailableAsync();
+          if (!available) {
+            Alert.alert('Unavailable', 'Sharing is not available on this device.');
+            return;
+          }
+          await Sharing.shareAsync(uri, { mimeType: 'image/jpeg' });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to build contact sheet.';
+        Alert.alert('Error', message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
 
   return (
     <Pressable
@@ -82,6 +139,10 @@ function ContactSheetInner() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Exported component
+// ---------------------------------------------------------------------------
+
 /** Pro-gated entry point. Free users get a compact upgrade prompt instead. */
 export function ContactSheetButton() {
   return (
@@ -90,6 +151,10 @@ export function ContactSheetButton() {
     </ProGate>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   button: {

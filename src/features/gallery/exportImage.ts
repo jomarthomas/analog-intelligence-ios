@@ -2,16 +2,15 @@
  * src/features/gallery/exportImage.ts
  *
  * Export helper for the Gallery: takes a processed (or original) ScannedImage,
- * applies free-tier resolution clamping, then either saves it to the Photos
+ * applies free-tier resolution clamping, bakes the watermark for free-tier
+ * users via the Skia offscreen compositor, then either saves to the Photos
  * library (expo-media-library) or opens the system share sheet (expo-sharing).
  *
  * Free-tier rules (from @/monetization):
  *   • clampResolution(size) downscales the export to HD for non-Pro users.
- *   • buildExportWatermarkParams() returns a watermark descriptor for free
- *     users. NOTE: expo-image-manipulator cannot draw text, and no native
- *     watermark-bake helper is wired into modules/ yet, so the watermark is
- *     currently only rendered as a UI overlay (WatermarkOverlay) on previews.
- *     Baking it into the exported file is a P0 follow-up — see the TODO below.
+ *   • buildExportWatermarkParams() returns a watermark descriptor; for free
+ *     users the compositor in skiaOffscreenCompositor.ts bakes it into the
+ *     exported JPEG file using an imperative Skia CPU-raster pipeline.
  *
  * Every export is recorded in the image's audit trail via addExportRecord().
  */
@@ -27,6 +26,7 @@ import {
 } from '@/monetization';
 import { addExportRecord } from '@/storage';
 import type { ScannedImage } from '@/storage';
+import { bakeWatermarkIntoFile } from '@/lib/skiaOffscreenCompositor';
 
 export type ExportDestination = 'photos' | 'share';
 
@@ -43,13 +43,16 @@ function sourceUriFor(image: ScannedImage): string | null {
 }
 
 /**
- * Render the export file: applies resolution clamping for the free tier and
- * re-encodes as JPEG into a temp file. Returns the temp URI + final size.
+ * Render the export file: applies resolution clamping for the free tier,
+ * re-encodes as JPEG, then — for free-tier users — bakes the watermark into
+ * the file using the Skia CPU-raster compositor.
  *
- * The watermark descriptor (free tier) is computed here so the bake step can
- * be slotted in once a native/Skia text compositor is available (P0 follow-up).
+ * Pro exports: full resolution, no watermark.
+ * Free exports: clamped to HD, watermark text baked by Skia offscreen surface.
  */
 async function renderExportFile(sourceUri: string): Promise<{ uri: string }> {
+  const isPro = getProStatusSync();
+
   // First render at native size to learn the true pixel dimensions.
   const baseRef = await ImageManipulator.manipulate(sourceUri).renderAsync();
   const original = { width: baseRef.width, height: baseRef.height };
@@ -63,19 +66,25 @@ async function renderExportFile(sourceUri: string): Promise<{ uri: string }> {
   }
   const rendered = await ctx.renderAsync();
 
-  // TODO(P0 / orchestrator): bake the free-tier watermark into the file.
-  // expo-image-manipulator has no text-drawing API and no native watermark
-  // helper exists in modules/ yet. buildExportWatermarkParams() already
-  // describes the desired overlay; a Skia or native compositor should consume
-  // it here before saveAsync. For now non-Pro exports are clamped but not
-  // watermarked at the file level (the UI overlay still applies on previews).
-  const watermark = buildExportWatermarkParams();
-  void watermark;
-
+  const jpegQuality = isPro ? 0.95 : 0.85;
   const result = await rendered.saveAsync({
     format: SaveFormat.JPEG,
-    compress: getProStatusSync() ? 0.95 : 0.85,
+    compress: jpegQuality,
   });
+
+  // Watermark baking: free-tier only.
+  const watermarkParams = buildExportWatermarkParams();
+  if (watermarkParams !== null) {
+    // bakeWatermarkIntoFile draws the watermark onto the JPEG and writes a NEW
+    // file in the cache directory, leaving the original manipulator output
+    // intact. Skia quality parameter is 0–100; convert from 0–1 float.
+    const { uri: watermarkedUri } = await bakeWatermarkIntoFile(
+      result.uri,
+      watermarkParams,
+      Math.round(jpegQuality * 100),
+    );
+    return { uri: watermarkedUri };
+  }
 
   return { uri: result.uri };
 }
