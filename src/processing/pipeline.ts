@@ -18,9 +18,11 @@
  *   already separated to support this.
  */
 
-import { processNegative } from '../../modules/ai-image-processing';
+import { applyUserAdjustments, processNegative } from '../../modules/ai-image-processing';
+import type { UserAdjustParams } from '../../modules/ai-image-processing';
 import { commitProcessedImage } from '../storage/imageRepository';
 import type { ScannedImage } from '../storage/models';
+import { applyAIEnhancements } from '../ai';
 import {
   PipelineError,
   toNativeParams,
@@ -128,12 +130,30 @@ export async function runPipeline(
     throw new PipelineError('Unexpected error in native pipeline', 'NATIVE_FAILED', err);
   }
 
+  // Step 1.5 — optional Pro AI enhancements (color reconstruction / dust removal),
+  // applied to the native positive before the storage commit. aiColor/aiDustRemoval
+  // are Pro-gated in the UI; applyAIEnhancements is a no-op when both are false.
+  // (Phase 2 scaffold — see src/ai; models are placeholders for now.) Best-effort:
+  // on failure we fall back to the un-enhanced positive rather than failing commit.
+  let processedUri = nativeResult.uri;
+  if (params.aiColor || params.aiDustRemoval) {
+    try {
+      const aiResult = await applyAIEnhancements(processedUri, {
+        aiColor: params.aiColor ?? false,
+        aiDustRemoval: params.aiDustRemoval ?? false,
+      });
+      processedUri = aiResult.uri;
+    } catch {
+      processedUri = nativeResult.uri;
+    }
+  }
+
   // Step 2 — commit to permanent storage
   let committedImage: ScannedImage;
   try {
     committedImage = await commitProcessedImage({
       imageId,
-      sourceCacheUri: nativeResult.uri,
+      sourceCacheUri: processedUri,
       processParams: toSnapshot(params),
     });
   } catch (err: unknown) {
@@ -164,20 +184,54 @@ export async function runPipeline(
 }
 
 // ---------------------------------------------------------------------------
-// Public: previewParams — lightweight re-run for Adjust screen debounce
+// Public: previewParams — fast live re-render for the Adjust screen (task #10)
 //
-// For MVP this re-runs processNegative (same as runPipeline but without
-// committing to storage). Once task #10 lands, replace the processNegative
-// call here with applyUserAdjustments(baseUri, params) — the rest stays.
+// Structural params (mode / removeOrangeMask / sharpen / aiColor / aiDustRemoval)
+// require a full processNegative re-run; the seven user-adjustment sliders use
+// the native applyUserAdjustments fast-path on a cached "base" positive. This
+// keeps slider dragging an order of magnitude cheaper than re-inverting.
+//
+// Note: the preview's adjustment stage operates on the rendered positive, so it
+// is a fast *approximation* of the committed render (runPipeline applies the
+// sliders inline during processNegative). The divergence is small; the stored
+// image from commit() is always the authoritative result.
 // ---------------------------------------------------------------------------
+
+/** Identity of the structural base — anything here changing forces a full re-run. */
+function structuralKey(originalUri: string, params: FullProcessParams): string {
+  return [
+    originalUri,
+    params.mode,
+    params.removeOrangeMask,
+    params.sharpen,
+    params.aiColor ?? false,
+    params.aiDustRemoval ?? false,
+  ].join('|');
+}
+
+/** The seven user-adjustment sliders extracted as the native UserAdjustParams. */
+function toUserAdjust(params: FullProcessParams): UserAdjustParams {
+  return {
+    exposure: params.exposure,
+    warmth: params.warmth,
+    contrast: params.contrast,
+    saturation: params.saturation,
+    highlights: params.highlights,
+    shadows: params.shadows,
+    vibrance: params.vibrance,
+  };
+}
+
+/** Single-entry cache of the last structural base positive (for the fast path). */
+let baseCache: { key: string; baseUri: string } | null = null;
 
 /**
  * Re-process the negative with updated params and return the cache URI for
  * live preview. Does NOT commit to storage.
  *
- * FAST-PATH SLOT (task #10): Replace processNegative call with
- *   applyUserAdjustments(baseUri, toNativeParams(params))
- * when the native module exposes it. No other changes needed.
+ * Fast path: re-runs the full pipeline only when a structural param changes,
+ * caching a neutral-slider base positive; otherwise applies just the slider
+ * adjustments to that base via the native applyUserAdjustments call.
  *
  * @param originalUri  file:// URI of the original capture.
  * @param params       Current params from the Adjust screen sliders.
@@ -187,13 +241,39 @@ export async function previewParams(
   originalUri: string,
   params: FullProcessParams,
 ): Promise<string> {
-  const nativeParams = toNativeParams(params);
+  const key = structuralKey(originalUri, params);
 
-  // MVP: re-run the full pipeline (no applyUserAdjustments fast path yet)
-  // task #10 fast-path slot ↓
-  const result = await processNegative(originalUri, nativeParams);
+  // (Re)build the structural base when structural params change. The base is
+  // processed with NEUTRAL sliders so applyUserAdjustments isn't double-applying
+  // the user adjustments that processNegative bakes in.
+  if (baseCache === null || baseCache.key !== key) {
+    const neutral: FullProcessParams = {
+      ...params,
+      exposure: 0,
+      warmth: 0,
+      contrast: 0,
+      saturation: 0,
+      highlights: 0,
+      shadows: 0,
+      vibrance: 0,
+    };
+    const base = await processNegative(originalUri, toNativeParams(neutral));
+    baseCache = { key, baseUri: base.uri };
+  }
 
-  return result.uri;
+  // Fast path: apply only the slider adjustments to the cached base positive.
+  const adjusted = await applyUserAdjustments(baseCache.baseUri, toUserAdjust(params));
+  return adjusted.uri;
+}
+
+/**
+ * Clear the preview base cache. Optional hygiene — call when leaving the Adjust
+ * screen. The cache also self-invalidates whenever the structural key changes
+ * (e.g. a different image or a structural param), so this is not required for
+ * correctness.
+ */
+export function clearPreviewCache(): void {
+  baseCache = null;
 }
 
 // ---------------------------------------------------------------------------
