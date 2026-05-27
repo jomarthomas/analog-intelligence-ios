@@ -23,6 +23,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
+import Vision
 
 // MARK: - Errors
 
@@ -38,6 +39,15 @@ internal final class ImageWriteFailedException: Exception {
   override var reason: String { "Failed to write the processed image to disk" }
 }
 
+/// Thrown when `exportFormat: 'dng'` is requested on Android (DECISIONS Q2).
+/// On iOS this is never thrown — DNG is handled by VisionCamera RAW capture,
+/// not by this module's post-processing export path.
+internal final class UnsupportedFormatException: Exception {
+  override var reason: String {
+    "DNG export is not supported on this platform. Use 'heic' or 'jpeg'."
+  }
+}
+
 // MARK: - Parameters record (mirrors src/AiImageProcessing.types.ts ProcessParams)
 
 internal struct ProcessParams: Record {
@@ -49,6 +59,21 @@ internal struct ProcessParams: Record {
   @Field var sharpen: Double = 0
   @Field var aiColor: Bool = false
   @Field var aiDustRemoval: Bool = false
+  @Field var saturation: Double = 0
+  @Field var highlights: Double = 0
+  @Field var shadows: Double = 0
+  @Field var vibrance: Double = 0
+}
+
+// MARK: - UserAdjustParams record (mirrors src/AiImageProcessing.types.ts UserAdjustParams)
+// Task #10: fast-path adjustment record — only the seven user-facing sliders.
+// All fields default to 0 (no change) so every field is optional from the JS
+// side (index.ts fills them before crossing the bridge).
+
+internal struct UserAdjustParams: Record {
+  @Field var exposure: Double = 0
+  @Field var warmth: Double = 0
+  @Field var contrast: Double = 0
   @Field var saturation: Double = 0
   @Field var highlights: Double = 0
   @Field var shadows: Double = 0
@@ -108,6 +133,50 @@ public class AiImageProcessingModule: Module {
         throw ImageNotFoundException()
       }
       return self.computeHistogram(cgImage: cgImage)
+    }
+
+    // MARK: applyUserAdjustments(baseUri, params) -> ProcessResult   [Task #10]
+    //
+    // Fast path for the live Adjust-screen preview. Loads the already-processed
+    // positive from `baseUri` and runs ONLY the user-adjustment stage (step 7
+    // of the full pipeline), skipping linearize / invert / orange-mask /
+    // normalise / tone-curve entirely. This mirrors the legacy behaviour where
+    // the Adjust screen re-applies `UserAdjustments.applyAdjustments` on an
+    // already-rendered positive without re-running the full pipeline.
+    AsyncFunction("applyUserAdjustments") { (baseUri: String, params: UserAdjustParams) -> [String: Any] in
+      guard let input = self.loadCIImage(from: baseUri) else {
+        throw ImageNotFoundException()
+      }
+      let output = self.applyUserAdjustmentsOnly(image: input, params: params)
+      guard let cgImage = self.ciContext.createCGImage(output, from: output.extent) else {
+        throw ImageRenderFailedException()
+      }
+      let uri = try self.writeJPEG(cgImage: cgImage, quality: 0.92)
+      return [
+        "uri": uri,
+        "width": cgImage.width,
+        "height": cgImage.height
+      ]
+    }
+
+    // MARK: detectFilmFrame(uri) -> FrameDetectionResult   [Task #10]
+    //
+    // Uses VNDetectRectanglesRequest (Vision framework) to locate the film-frame
+    // boundary in a captured image. Parameters are tuned for 35 mm film:
+    //   - aspect ratio 0.6 … 0.7  (~2:3 portrait frame)
+    //   - minimum coverage 30 % of the image
+    //   - minimum confidence 0.7
+    // Ported from legacy-ios/Vision/FrameDetector.detectFilmFrame.
+    //
+    // NOTE: VNImageRequestHandler.perform(_:) is synchronous and blocks the
+    // calling thread. Expo's AsyncFunction already dispatches the closure to a
+    // background thread, so blocking here is safe and matches the existing
+    // pattern used by processNegative (which also blocks on ciContext.render).
+    AsyncFunction("detectFilmFrame") { (uri: String) -> [String: Any] in
+      guard let image = self.loadCIImage(from: uri) else {
+        throw ImageNotFoundException()
+      }
+      return try self.detectFilmFrameVision(image: image)
     }
   }
 
@@ -554,6 +623,149 @@ public class AiImageProcessingModule: Module {
     ]
   }
 
+  // MARK: - Task #10: fast-path user adjustments
+
+  /// Applies only the seven user-facing sliders to `image`, with no pipeline
+  /// pre/post stages. The filter graph is identical to the adjustment section
+  /// of `applyUserAdjustments(image:params:ProcessParams)` — same filter names,
+  /// same coefficient mappings — but parameterised by `UserAdjustParams` so
+  /// the call-site doesn't need to construct a full `ProcessParams`.
+  private func applyUserAdjustmentsOnly(image: CIImage, params: UserAdjustParams) -> CIImage {
+    var result = image
+
+    // 1. Exposure — CIExposureAdjust (applyExposure). Direct EV value.
+    if params.exposure != 0 {
+      let f = CIFilter(name: "CIExposureAdjust")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(Float(params.exposure), forKey: kCIInputEVKey)
+      result = f.outputImage ?? result
+    }
+
+    // 2. Highlights & shadows — CIHighlightShadowAdjust (applyHighlightsShadows).
+    //    highlightAmount = 1 - highlights; shadowAmount = shadows.
+    if params.highlights != 0 || params.shadows != 0 {
+      let f = CIFilter(name: "CIHighlightShadowAdjust")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(1.0 - Float(params.highlights), forKey: "inputHighlightAmount")
+      f.setValue(Float(params.shadows), forKey: "inputShadowAmount")
+      result = f.outputImage ?? result
+    }
+
+    // 3. Contrast — CIColorControls (applyContrast). contrast = 1 + value.
+    if params.contrast != 0 {
+      let f = CIFilter(name: "CIColorControls")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(1.0 + Float(params.contrast), forKey: kCIInputContrastKey)
+      result = f.outputImage ?? result
+    }
+
+    // 4. Warmth — CITemperatureAndTint (applyWarmth). neutral = 6500 + value*2000.
+    if params.warmth != 0 {
+      let f = CIFilter(name: "CITemperatureAndTint")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      let temperature = 6500.0 + (params.warmth * 2000.0)
+      f.setValue(CIVector(x: CGFloat(temperature), y: 0), forKey: "inputNeutral")
+      f.setValue(CIVector(x: 6500, y: 0), forKey: "inputTargetNeutral")
+      result = f.outputImage ?? result
+    }
+
+    // 5. Saturation — CIColorControls (applySaturation). saturation = 1 + value.
+    if params.saturation != 0 {
+      let f = CIFilter(name: "CIColorControls")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(1.0 + Float(params.saturation), forKey: kCIInputSaturationKey)
+      result = f.outputImage ?? result
+    }
+
+    // 6. Vibrance — CIVibrance (applyVibrance). Direct amount.
+    if params.vibrance != 0 {
+      let f = CIFilter(name: "CIVibrance")!
+      f.setValue(result, forKey: kCIInputImageKey)
+      f.setValue(Float(params.vibrance), forKey: "inputAmount")
+      result = f.outputImage ?? result
+    }
+
+    return result
+  }
+
+  // MARK: - Task #10: Vision frame detection
+
+  /// Port of FrameDetector.detectFilmFrame + convertToImageCoordinates +
+  /// getBoundingRect. Uses VNDetectRectanglesRequest with parameters tuned for
+  /// 35 mm film (aspect ratio 0.6…0.7, minimum coverage 30 %, confidence 0.7).
+  ///
+  /// Vision uses normalized coordinates with the origin at *bottom-left*; the
+  /// legacy code converts to image-pixel space with origin *top-left*. We
+  /// faithfully reproduce that conversion here (see FrameDetector lines 68-91).
+  ///
+  /// `VNImageRequestHandler.perform(_:)` is synchronous. This method blocks
+  /// the calling thread; callers must dispatch it off the main thread (Expo's
+  /// AsyncFunction wrapper already does so).
+  private func detectFilmFrameVision(image: CIImage) throws -> [String: Any] {
+    let imageSize = image.extent.size
+
+    let request = VNDetectRectanglesRequest()
+    request.minimumAspectRatio = 0.6   // ~2:3 for 35 mm (FrameDetector.minimumAspectRatio)
+    request.maximumAspectRatio = 0.7   // (FrameDetector.maximumAspectRatio)
+    request.minimumSize = 0.3          // ≥30 % of image (FrameDetector.minimumSize)
+    request.minimumConfidence = 0.7    // (FrameDetector.minimumConfidence)
+    request.maximumObservations = 1    // Most prominent rectangle only
+
+    let handler = VNImageRequestHandler(ciImage: image, options: [:])
+    do {
+      try handler.perform([request])
+    } catch {
+      // Return not-found rather than propagating Vision internals to JS.
+      return notFoundResult()
+    }
+
+    guard let obs = (request.results as? [VNRectangleObservation])?.first else {
+      return notFoundResult()
+    }
+
+    let w = imageSize.width
+    let h = imageSize.height
+
+    // FrameDetector.convertToImageCoordinates: Vision bottom-left → top-left.
+    func toPixels(_ normalized: CGPoint) -> [String: Double] {
+      return [
+        "x": Double(normalized.x * w),
+        "y": Double((1.0 - normalized.y) * h)
+      ]
+    }
+
+    let topLeft     = toPixels(obs.topLeft)
+    let topRight    = toPixels(obs.topRight)
+    let bottomLeft  = toPixels(obs.bottomLeft)
+    let bottomRight = toPixels(obs.bottomRight)
+
+    // FrameDetector.getBoundingRect: axis-aligned bounding box from boundingBox.
+    // Vision's boundingBox origin is bottom-left normalized; convert to pixel top-left.
+    let bb = obs.boundingBox
+    let cropRect: [String: Double] = [
+      "x": Double(bb.origin.x * w),
+      "y": Double((1.0 - bb.origin.y - bb.height) * h),
+      "width": Double(bb.width * w),
+      "height": Double(bb.height * h)
+    ]
+
+    return [
+      "found": true,
+      "quad": [
+        "topLeft": topLeft,
+        "topRight": topRight,
+        "bottomLeft": bottomLeft,
+        "bottomRight": bottomRight
+      ],
+      "cropRect": cropRect,
+      "confidence": Double(obs.confidence)
+    ]
+  }
+
+  private func notFoundResult() -> [String: Any] {
+    return ["found": false, "confidence": 0.0]
+  }
+
   // MARK: - Output
 
   /// Write a JPEG into the Expo cache directory and return its file:// URI,
@@ -572,6 +784,38 @@ public class AiImageProcessingModule: Module {
     do {
       try data.write(to: fileURL, options: .atomic)
     } catch {
+      throw ImageWriteFailedException()
+    }
+    return fileURL.absoluteString
+  }
+
+  /// Write a HEIC into the Expo cache directory and return its file:// URI.
+  ///
+  /// Uses `ImageIO`'s `CGImageDestinationCreateWithURL` with the `public.heic`
+  /// UTI. Falls back to JPEG (via `writeJPEG`) if HEIC is unavailable (iOS <
+  /// 11 or simulator with no HEIC encoder). The fallback is transparent to the
+  /// caller — the returned URI will be a `.jpg` in that case.
+  private func writeHEIC(cgImage: CGImage, quality: CGFloat) throws -> String {
+    let cacheURL = appContext?.config.cacheDirectory
+      ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+    let dir = cacheURL.appendingPathComponent("AiImageProcessing", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let fileURL = dir.appendingPathComponent("\(UUID().uuidString).heic")
+
+    guard let destination = CGImageDestinationCreateWithURL(
+      fileURL as CFURL,
+      "public.heic" as CFString,
+      1,
+      nil
+    ) else {
+      // HEIC encoder unavailable — fall back to JPEG transparently.
+      return try writeJPEG(cgImage: cgImage, quality: quality)
+    }
+
+    let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+    CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+
+    guard CGImageDestinationFinalize(destination) else {
       throw ImageWriteFailedException()
     }
     return fileURL.absoluteString

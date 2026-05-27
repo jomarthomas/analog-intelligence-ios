@@ -1,6 +1,12 @@
 import { requireNativeModule } from 'expo';
 
-import type { Histogram, ProcessParams, ProcessResult } from './AiImageProcessing.types';
+import type {
+  Histogram,
+  ProcessParams,
+  ProcessResult,
+  UserAdjustParams,
+  FrameDetectionResult,
+} from './AiImageProcessing.types';
 
 /**
  * The native side of the module. The methods here mirror exactly the
@@ -14,6 +20,12 @@ import type { Histogram, ProcessParams, ProcessResult } from './AiImageProcessin
 export interface AiImageProcessingNativeModule {
   processNegative(inputUri: string, params: ProcessParams): Promise<ProcessResult>;
   analyzeHistogram(uri: string): Promise<Histogram>;
+  // Task #10 additions — additive:
+  applyUserAdjustments(
+    baseUri: string,
+    params: Required<UserAdjustParams>,
+  ): Promise<ProcessResult>;
+  detectFilmFrame(uri: string): Promise<FrameDetectionResult>;
 }
 
 // `requireNativeModule` is re-exported from `expo` in SDK 56 (the convention

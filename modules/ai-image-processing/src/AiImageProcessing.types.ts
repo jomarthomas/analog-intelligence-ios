@@ -134,3 +134,109 @@ export interface Histogram {
   /** Percent of pixels clipped into highlights (0–100). */
   highlightClipPct: number;
 }
+
+// ---------------------------------------------------------------------------
+// Task #10 additions — additive only, do not touch the types above.
+// ---------------------------------------------------------------------------
+
+/**
+ * User-facing adjustment parameters for the live Adjust-screen fast path.
+ *
+ * This is the subset of {@link ProcessParams} that `applyUserAdjustments`
+ * accepts. It covers the seven sliders that are interactive on the Adjust
+ * screen. The pipeline stages that precede user adjustments (linearise →
+ * invert → orange-mask → normalise → tone-curve) are intentionally absent;
+ * `applyUserAdjustments` operates on an already-processed positive and
+ * skips all of those.
+ *
+ * All fields are optional and default to 0 (no change) on both platforms,
+ * matching the defaults in {@link ProcessParams}.
+ */
+export interface UserAdjustParams {
+  /** Exposure in EV. Range −2.0…+2.0. Default 0. */
+  exposure?: number;
+  /** Warmth −1.0…+1.0 (cool → warm). Default 0. */
+  warmth?: number;
+  /** Contrast −1.0…+1.0. Default 0. */
+  contrast?: number;
+  /** Saturation −1.0…+1.0. Default 0. */
+  saturation?: number;
+  /** Highlights −1.0…+1.0. Default 0. */
+  highlights?: number;
+  /** Shadows −1.0…+1.0. Default 0. */
+  shadows?: number;
+  /** Vibrance −1.0…+1.0. Default 0. */
+  vibrance?: number;
+}
+
+/**
+ * A 2-D point in image-pixel coordinates (origin top-left).
+ * Ported from `FrameDetector.convertToImageCoordinates` which converts
+ * Vision's normalized bottom-left origin to pixel space top-left origin.
+ */
+export interface FramePoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Result of {@link detectFilmFrame}.
+ *
+ * When `found` is `true` the quad corners (pixel coordinates, origin
+ * top-left) and an axis-aligned `cropRect` are populated. `confidence`
+ * is always present (0.0–1.0); on Android where the heuristic cannot
+ * produce a result it will be 0.
+ *
+ * Ported from `legacy-ios/Vision/FrameDetector.swift`:
+ *   - Quad corners map to `VNRectangleObservation.topLeft/topRight/
+ *     bottomLeft/bottomRight` converted via `convertToImageCoordinates`.
+ *   - `cropRect` maps to `getBoundingRect`.
+ *   - `confidence` maps to `VNRectangleObservation.confidence`.
+ */
+export interface FrameDetectionResult {
+  /** Whether a film-frame rectangle was found. */
+  found: boolean;
+  /**
+   * The four corner points of the detected quadrilateral, in image-pixel
+   * coordinates (origin top-left). Present only when `found` is true.
+   */
+  quad?: {
+    topLeft: FramePoint;
+    topRight: FramePoint;
+    bottomLeft: FramePoint;
+    bottomRight: FramePoint;
+  };
+  /**
+   * Axis-aligned bounding rectangle of the detected frame, in image-pixel
+   * coordinates. Derived from `quad` when present; undefined otherwise.
+   */
+  cropRect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  /**
+   * Detection confidence in [0, 1]. Maps to `VNRectangleObservation.confidence`
+   * on iOS. On Android this is always 0 (heuristic path, see TODO in Kotlin).
+   */
+  confidence: number;
+}
+
+/**
+ * Supported export formats for {@link processNegative} (via the `exportFormat`
+ * field, if added to {@link ProcessParams} in a future additive change).
+ *
+ * - `'jpeg'` — default; supported on both platforms.
+ * - `'heic'` — High Efficiency Image Container; supported on both platforms
+ *   (Android API ≥ 28 / Heif encoder present). Falls back to JPEG if the
+ *   hardware encoder is unavailable.
+ * - `'dng'`  — Adobe Digital Negative (RAW); iOS only. On Android the native
+ *   module throws `UNSUPPORTED_FORMAT` (see DECISIONS Q2). The Pipeline layer
+ *   is expected to catch that error and fall back to HEIC/JPEG, surfacing a
+ *   one-time user note.
+ *
+ * The string union is exported here so the Pipeline workstream can use it for
+ * Pro-gating and the format-picker UI without importing from an unrelated file.
+ */
+export type ExportFormat = 'jpeg' | 'heic' | 'dng';
