@@ -27,9 +27,7 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "permissions": [
-        "android.permission.CAMERA"
-      ],
+      "permissions": ["android.permission.CAMERA"],
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -50,9 +48,44 @@
       ],
       "expo-sqlite",
       "expo-sharing",
-      "react-native-google-mobile-ads",
-      "expo-build-properties"
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "Analog Intelligence uses the camera to scan film negatives.",
+          "enableCodeScanner": false,
+          "enableMicrophonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Analog Intelligence can import negatives from your photo library.",
+          "savePhotosPermission": "Analog Intelligence saves your scanned positives to your photo library.",
+          "isAccessMediaLocationEnabled": false
+        }
+      ],
+      [
+        "react-native-google-mobile-ads",
+        {
+          "android_app_id": "ca-app-pub-3940256099942544~3347511713",
+          "ios_app_id": "ca-app-pub-3940256099942544~1458002511"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": { "deploymentTarget": "15.1" }
+        }
+      ]
     ],
+    "extra": {
+      "revenueCatApiKeyIos": "appl_PLACEHOLDER_REVENUECAT_IOS_KEY",
+      "revenueCatApiKeyAndroid": "goog_PLACEHOLDER_REVENUECAT_ANDROID_KEY",
+      "revenueCatEntitlementId": "pro",
+      "revenueCatOfferingId": "default",
+      "admobBannerAdUnitIdIos": "ca-app-pub-3940256099942544/2934735716",
+      "admobBannerAdUnitIdAndroid": "ca-app-pub-3940256099942544/6300978111"
+    },
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
