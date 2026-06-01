@@ -51,6 +51,7 @@ import { readCapabilities, readSnapshot } from '@/camera/cameraController';
 import { capturePhoto } from '@/camera/capturePhoto';
 import { CAPTURE_FORMATS, CAPTURE_FORMAT_ORDER, type CaptureFormat } from '@/camera/types';
 import { FrameAlignmentOverlay } from '@/features/scan/FrameAlignmentOverlay';
+import { FocusPeakingOverlay } from '@/features/scan/FocusPeakingOverlay';
 import { ManualControlsPanel } from '@/features/scan/ManualControlsPanel';
 
 export interface CameraScanViewProps {
@@ -231,13 +232,12 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
       {/* Composition guide (also the manual fallback for frame detection) */}
       {showFrameGuide ? <FrameAlignmentOverlay /> : null}
 
-      {/* Focus-peaking status pill (live overlay stubbed — see useFrameProcessors) */}
-      {focusPeakingEnabled && !frame.isPeakingActive ? (
-        <View style={styles.peakingNotice} pointerEvents="none">
-          <Text style={styles.peakingNoticeText}>
-            Focus peaking unavailable — use manual focus
-          </Text>
-        </View>
+      {/* Live focus-peaking overlay — rendered when the frame processor is active */}
+      {focusPeakingEnabled && frame.isPeakingActive ? (
+        <FocusPeakingOverlay
+          peakCells={frame.peakCells}
+          peakingColor={peakingColor}
+        />
       ) : null}
 
       {/* Top controls: flash + format picker */}

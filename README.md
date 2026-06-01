@@ -23,7 +23,8 @@ watermark; **Pro** unlocks full-resolution export, AI processing, and Insights.
 | Auto frame-detection, live histogram, dock control UI | ✅ wired |
 | Phase 2 — on-device AI (color reconstruction, dust removal) | 🧪 scaffold (placeholder models) |
 | Phase 3 — BLE dock auto-roll-scan | 🧪 interfaces + simulation |
-| Focus peaking, file-level watermark/contact-sheet (Skia) | ⏳ documented follow-ups (need device build) |
+| Focus peaking (VisionCamera v5 frame processor) | ✅ implemented — on-device verification recommended |
+| File-level watermark baking + contact-sheet composite (Skia) | ✅ implemented — on-device verification recommended |
 
 ## Stack
 

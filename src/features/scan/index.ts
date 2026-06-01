@@ -15,3 +15,6 @@ export type { DetectedFrameOverlayProps } from './DetectedFrameOverlay';
 
 export { DockStatusBar } from './DockStatusBar';
 export type { DockStatusBarProps } from './DockStatusBar';
+
+export { FocusPeakingOverlay } from './FocusPeakingOverlay';
+export type { FocusPeakingOverlayProps, PeakCell } from './FocusPeakingOverlay';

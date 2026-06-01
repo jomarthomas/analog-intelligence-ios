@@ -32,7 +32,7 @@ import Slider from '@react-native-community/slider';
 import type { CameraRef } from 'react-native-vision-camera';
 
 import { Palette, Spacing, FontSize, FontWeight, Radius } from '@/theme';
-import { useCaptureStore } from '@/state/captureStore';
+import { useCaptureStore, type PeakingColor, type PeakingSensitivity } from '@/state/captureStore';
 import {
   whiteBalanceGainsForTemperature,
   clampWhiteBalanceGains,
@@ -57,10 +57,17 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
   const snapshot = useCaptureStore((s) => s.snapshot);
   const wbPreset = useCaptureStore((s) => s.whiteBalancePreset);
 
+  const focusPeakingEnabled = useCaptureStore((s) => s.focusPeakingEnabled);
+  const peakingSensitivity = useCaptureStore((s) => s.peakingSensitivity);
+  const peakingColor = useCaptureStore((s) => s.peakingColor);
+
   const setSnapshot = useCaptureStore((s) => s.setSnapshot);
   const setLocks = useCaptureStore((s) => s.setLocks);
   const setAllLocks = useCaptureStore((s) => s.setAllLocks);
   const setWhiteBalancePreset = useCaptureStore((s) => s.setWhiteBalancePreset);
+  const toggleFocusPeaking = useCaptureStore((s) => s.toggleFocusPeaking);
+  const setPeakingSensitivity = useCaptureStore((s) => s.setPeakingSensitivity);
+  const setPeakingColor = useCaptureStore((s) => s.setPeakingColor);
 
   // Local expand/collapse (not global UI state).
   const expanded = useExpanded();
@@ -345,6 +352,16 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
               )}
             </View>
           ) : null}
+
+          {/* Focus Peaking toggle + sub-controls */}
+          <FocusPeakingControls
+            enabled={focusPeakingEnabled}
+            sensitivity={peakingSensitivity}
+            color={peakingColor}
+            onToggle={toggleFocusPeaking}
+            onSensitivityChange={setPeakingSensitivity}
+            onColorChange={setPeakingColor}
+          />
         </View>
       ) : null}
     </View>
@@ -436,6 +453,101 @@ function WhiteBalanceSegments({
           </Pressable>
         );
       })}
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Focus Peaking controls
+// ---------------------------------------------------------------------------
+
+/** Sensitivity labels shown in the segmented control. */
+const SENSITIVITY_OPTIONS: { value: PeakingSensitivity; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Med' },
+  { value: 'high', label: 'High' },
+];
+
+/** Colour options for the peaking overlay. */
+const COLOR_OPTIONS: { value: PeakingColor; label: string }[] = [
+  { value: 'red', label: 'Red' },
+  { value: 'green', label: 'Grn' },
+  { value: 'blue', label: 'Blu' },
+  { value: 'yellow', label: 'Ylw' },
+  { value: 'white', label: 'Wht' },
+];
+
+function FocusPeakingControls({
+  enabled,
+  sensitivity,
+  color,
+  onToggle,
+  onSensitivityChange,
+  onColorChange,
+}: {
+  enabled: boolean;
+  sensitivity: PeakingSensitivity;
+  color: PeakingColor;
+  onToggle: () => void;
+  onSensitivityChange: (s: PeakingSensitivity) => void;
+  onColorChange: (c: PeakingColor) => void;
+}) {
+  return (
+    <View style={styles.peakingSection}>
+      {/* Toggle row */}
+      <Pressable style={styles.peakingHeader} onPress={onToggle} accessibilityRole="switch">
+        <Text style={styles.blockLabel}>Focus Peaking</Text>
+        <View style={[styles.peakingBadge, enabled && styles.peakingBadgeActive]}>
+          <Text style={[styles.peakingBadgeText, enabled && styles.peakingBadgeTextActive]}>
+            {enabled ? 'ON' : 'OFF'}
+          </Text>
+        </View>
+      </Pressable>
+
+      {/* Sub-controls only visible when enabled */}
+      {enabled ? (
+        <View style={styles.peakingBody}>
+          {/* Sensitivity */}
+          <View style={styles.peakingRow}>
+            <Text style={styles.peakingSubLabel}>Sensitivity</Text>
+            <View style={styles.segments}>
+              {SENSITIVITY_OPTIONS.map(({ value, label }) => {
+                const active = value === sensitivity;
+                return (
+                  <Pressable
+                    key={value}
+                    onPress={() => onSensitivityChange(value)}
+                    style={[styles.segment, active && styles.segmentActive]}>
+                    <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                      {label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
+          {/* Colour */}
+          <View style={styles.peakingRow}>
+            <Text style={styles.peakingSubLabel}>Colour</Text>
+            <View style={styles.segments}>
+              {COLOR_OPTIONS.map(({ value, label }) => {
+                const active = value === color;
+                return (
+                  <Pressable
+                    key={value}
+                    onPress={() => onColorChange(value)}
+                    style={[styles.segment, active && styles.segmentActive]}>
+                    <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                      {label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -642,5 +754,46 @@ const styles = StyleSheet.create({
   },
   lockAllText: {
     color: Palette.white,
+  },
+
+  // ---- Focus Peaking -------------------------------------------------------
+  peakingSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.15)',
+    paddingTop: Spacing.sm,
+    gap: Spacing.sm,
+  },
+  peakingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  peakingBadge: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 2,
+    borderRadius: Radius.full,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  peakingBadgeActive: {
+    backgroundColor: Palette.amber,
+  },
+  peakingBadgeText: {
+    color: Palette.ash,
+    fontSize: FontSize.xs,
+    fontWeight: FontWeight.semibold,
+  },
+  peakingBadgeTextActive: {
+    color: Palette.black,
+  },
+  peakingBody: {
+    gap: Spacing.sm,
+  },
+  peakingRow: {
+    gap: Spacing.xs,
+  },
+  peakingSubLabel: {
+    color: Palette.ash,
+    fontSize: FontSize.xs,
+    fontWeight: FontWeight.medium,
   },
 });
