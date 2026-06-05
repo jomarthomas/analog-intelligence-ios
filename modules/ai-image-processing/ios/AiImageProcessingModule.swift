@@ -533,6 +533,17 @@ public class AiImageProcessingModule: Module {
     static let `default` = OrangeMask(redDensity: 1.0, greenDensity: 0.65, blueDensity: 0.4, strength: 0.6)
   }
 
+  /// Upper bound on a per-channel orange-mask compensation gain. Caps the
+  /// `1/density` amplification so the mask-removal CIColorMatrix can never blow
+  /// a channel out to pure white, even from a degenerate base estimate.
+  private static let kMaxMaskGain: Float = 3.0
+
+  /// Upper luminance bound (0–255) for film-base candidates. Near-clipped
+  /// pixels are the light source / bright background bleeding around the frame,
+  /// not the dense orange rebate, so they are excluded from base sampling to
+  /// resist a bright surround contaminating the estimate.
+  private static let kBaseMaxLuma: Float = 250
+
   /// Estimate the orange mask, preferring **film-base (rebate) sampling**.
   ///
   /// Pro film-scanning derives the mask from the unexposed film *base* — in a
@@ -569,19 +580,36 @@ public class AiImageProcessingModule: Module {
   /// The legacy removal expects densities derived from the *inverted* base
   /// (i.e. `1 - base`), normalized to red. We reproduce that exactly so the
   /// CIColorMatrix step is identical to before — only the estimate is better.
+  ///
+  /// ROBUSTNESS (white-out guard): the post-invert base channels are floored to
+  /// `kMinBaseDensity` BEFORE the ratios are taken, so a near-white/over-bright
+  /// or contaminated base sample (which would otherwise drive a channel density
+  /// → 0 and the downstream `1/density` gain → ∞, blowing the image to pure
+  /// white) instead yields a bounded, well-behaved mask. Densities are then
+  /// clamped to `[kMinBaseDensity, 1]`.
   private func densitiesFromBase(baseR: Float, baseG: Float, baseB: Float) -> OrangeMask {
-    // Post-invert equivalent of the base = 1 - base (clamped).
-    let r = max(0, min(1, 1 - baseR))
-    let g = max(0, min(1, 1 - baseG))
-    let b = max(0, min(1, 1 - baseB))
-    let safeR = max(r, 0.0001)
+    // Post-invert equivalent of the base = 1 - base (clamped). Floor every
+    // channel so no density can collapse toward zero.
+    let r = clampDensity(1 - baseR)
+    let g = clampDensity(1 - baseG)
+    let b = clampDensity(1 - baseB)
     let range = max(r, g, b) - min(r, g, b)
     return OrangeMask(
       redDensity: 1.0,
-      greenDensity: g / safeR,
-      blueDensity: b / safeR,
+      greenDensity: clampDensity(g / r),
+      blueDensity: clampDensity(b / r),
       strength: range > 0.1 ? min(1.0, range * 2.0) : 0.3
     )
+  }
+
+  /// Minimum trustworthy per-channel film-base density. Floors the orange-mask
+  /// densities so the `1/density` compensation gains in `removeOrangeMask` stay
+  /// bounded — a primary guard against the pure-white blow-out.
+  private static let kMinBaseDensity: Float = 0.05
+
+  /// Clamp a derived density into `[kMinBaseDensity, 1]`.
+  private func clampDensity(_ v: Float) -> Float {
+    return min(1.0, max(Self.kMinBaseDensity, v))
   }
 
   /// Sample the brightest, most-saturated-orange region of the PRE-invert image
@@ -639,23 +667,33 @@ public class AiImageProcessingModule: Module {
     // a real orange spread, and high luminance (the base is the brightest part
     // of a negative). Thresholds are deterministic and intentionally strict so
     // a non-orange scene does NOT trigger this path (it falls back instead).
-    var base: [(r: Float, g: Float, b: Float, lum: Float)] = []
+    //
+    // CONTAMINATION GUARD: exclude near-clipped pixels (luma ≥ kBaseMaxLuma).
+    // The unexposed C-41 base photographs as a bright-but-not-blown orange; a
+    // fully-clipped region is the light source / a bright background bleeding
+    // around the frame, NOT the dense film base. Dropping those keeps a bright
+    // surround from contaminating (and over-brightening) the base estimate.
+    // Candidates are then ranked by ORANGE STRENGTH (R−B) rather than raw
+    // luminance, so the most saturated-orange rebate pixels win over a merely
+    // bright, weakly-warm background that scraped past the ordering test.
+    var base: [(r: Float, g: Float, b: Float, orange: Float)] = []
     for i in 0..<(w * h) {
       let o = i * 4
       let r = Float(pixels[o]); let g = Float(pixels[o + 1]); let b = Float(pixels[o + 2])
       let lum = 0.299 * r + 0.587 * g + 0.114 * b
-      // Orange ordering with margin, and bright enough to be the base.
+      // Orange ordering with margin, bright enough to be the base, but not a
+      // blown highlight.
       let orange = (r > g + 10) && (g > b + 5)
-      if lum > 120 && orange {
-        base.append((r / 255, g / 255, b / 255, lum))
+      if lum > 120 && lum < Self.kBaseMaxLuma && orange {
+        base.append((r / 255, g / 255, b / 255, r - b))
       }
     }
 
     // Need a convincing amount of base to trust this estimate.
     guard base.count >= 100 else { return nil }
 
-    // Average the 100 BRIGHTEST orange-base pixels (max-density base).
-    base.sort { $0.lum > $1.lum }
+    // Average the 100 MOST-ORANGE base pixels (max-density base).
+    base.sort { $0.orange > $1.orange }
     let samples = base.prefix(100)
     let count = Float(samples.count)
     let avgR = samples.map { $0.r }.reduce(0, +) / count
@@ -717,12 +755,16 @@ public class AiImageProcessingModule: Module {
     let avgG = samples.map { $0.g }.reduce(0, +) / count
     let avgB = samples.map { $0.b }.reduce(0, +) / count
 
-    let safeR = max(avgR, 0.0001)
-    let range = max(avgR, avgG, avgB) - min(avgR, avgG, avgB)
+    // Floor the sampled channels (white-out guard) before the red-normalized
+    // ratios so a degenerate dark sample cannot drive a density toward zero.
+    let r = clampDensity(avgR)
+    let g = clampDensity(avgG)
+    let b = clampDensity(avgB)
+    let range = max(r, g, b) - min(r, g, b)
     return OrangeMask(
       redDensity: 1.0,
-      greenDensity: avgG / safeR,
-      blueDensity: avgB / safeR,
+      greenDensity: clampDensity(g / r),
+      blueDensity: clampDensity(b / r),
       strength: range > 0.1 ? min(1.0, range * 2.0) : 0.3
     )
   }
@@ -735,9 +777,14 @@ public class AiImageProcessingModule: Module {
     let greenComp = 1.0 / max(mask.greenDensity, 0.1)
     let blueComp = 1.0 / max(mask.blueDensity, 0.1)
 
-    let norm = blueComp
-    let redGain = CGFloat(redComp / norm)
-    let greenGain = CGFloat(greenComp / norm)
+    // Normalize the compensations to the most-compensated (blue) channel, then
+    // CAP the per-channel gains. Even with floored densities a ratio could be
+    // a few ×; clamping to `kMaxMaskGain` guarantees the mask-removal step can
+    // never multiply a channel hard enough to clip the frame to pure white
+    // (white-out guard) while still neutralising a real orange cast.
+    let norm = max(blueComp, 0.0001)
+    let redGain = CGFloat(min(redComp / norm, Self.kMaxMaskGain))
+    let greenGain = CGFloat(min(greenComp / norm, Self.kMaxMaskGain))
     let blueGain: CGFloat = 1.0
 
     let m = CIFilter(name: "CIColorMatrix")!
@@ -797,9 +844,29 @@ public class AiImageProcessingModule: Module {
 
   // MARK: Step 6 — automatic tone correction (ColorCorrector)
 
-  /// Port of ColorCorrector.calculateToneCurve + applyToneCurve:
-  /// build a luminance CDF from CIAreaHistogram, find 1%/99% black/white
-  /// points, then apply brightness=log2(1/range), contrast=1.1, gamma=1/0.5.
+  /// Robust automatic tone correction.
+  ///
+  /// Derived from ColorCorrector.calculateToneCurve + applyToneCurve, but
+  /// hardened against the pure-white blow-out the legacy formula could produce.
+  ///
+  /// WHITE-OUT FIX — what changed vs the legacy port and WHY:
+  ///   The legacy curve computed `brightness = log2(1/range)` and fed it to
+  ///   `CIColorControls.inputBrightness`, which is an *additive* offset in
+  ///   display space. For any capture that wasn't a perfectly-filled, evenly-lit
+  ///   negative, `range` is small, so that offset is large (up to ~3.3 EV) and
+  ///   is *added* to every pixel — pushing the whole frame past 1.0 and clipping
+  ///   it to solid white. That is the reported failure.
+  ///
+  ///   It is replaced by a bounded LEVELS REMAP: a slope+bias that maps the
+  ///   robust black/white points to [0,1] (`out = (in - black) / range`). This
+  ///   is monotonic and self-normalising — `whitePoint` maps to exactly 1.0, so
+  ///   it can NEVER drive values above white. `range` is floored
+  ///   (`kMinToneRange`) so the slope can't explode on a flat capture, and the
+  ///   black/white points use robust 2%/98% percentiles (ignoring the
+  ///   brightest/darkest outliers) so a few stray hot/dead pixels don't define
+  ///   the mapping. The gentle contrast (1.1) and the midtone gamma are kept,
+  ///   but applied *after* the safe remap. Worst case is a flat-but-usable
+  ///   image, never a blank one.
   private func applyToneCorrection(image: CIImage) -> CIImage {
     let extent = image.extent
     let hist = CIFilter(name: "CIAreaHistogram")!
@@ -818,41 +885,96 @@ public class AiImageProcessingModule: Module {
       colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
     )
 
-    // Luminance-weighted CDF over the histogram bins (BT.601, matching legacy).
+    let (blackPoint, whitePoint) = robustBlackWhitePoints(histogram: data)
+
+    let contrast: Float = 1.1
+    // Floor the range so a flat/low-contrast capture yields a bounded slope
+    // (≤ 1/kMinToneRange) instead of an exploding amplification → white.
+    let inputRange = max(whitePoint - blackPoint, Self.kMinToneRange)
+    let slope = CGFloat(1.0 / inputRange)
+    let bias = CGFloat(-Double(blackPoint) / Double(inputRange))
+
+    // Stage 1: bounded levels remap (slope+bias) via CIColorMatrix. Maps
+    // [blackPoint, whitePoint] → [0, 1]; whitePoint lands at exactly 1.0, so
+    // this stage cannot push values above white (the legacy additive-brightness
+    // blow-out is structurally impossible here).
+    let levels = CIFilter(name: "CIColorMatrix")!
+    levels.setValue(image, forKey: kCIInputImageKey)
+    levels.setValue(CIVector(x: slope, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    levels.setValue(CIVector(x: 0, y: slope, z: 0, w: 0), forKey: "inputGVector")
+    levels.setValue(CIVector(x: 0, y: 0, z: slope, w: 0), forKey: "inputBVector")
+    levels.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    levels.setValue(CIVector(x: bias, y: bias, z: bias, w: 0), forKey: "inputBiasVector")
+    guard let leveled = levels.outputImage else { return image }
+
+    // Stage 2: gentle contrast about mid-grey (CIColorControls), unchanged 1.1.
+    let contrastF = CIFilter(name: "CIColorControls")!
+    contrastF.setValue(leveled, forKey: kCIInputImageKey)
+    contrastF.setValue(contrast, forKey: kCIInputContrastKey)
+    guard let contrasted = contrastF.outputImage else { return leveled }
+
+    // Stage 3: gentle midtone-LIFT gamma (CIGammaAdjust).
+    //
+    // TONE FIX (Task #3 — "tuned to not crush"): the legacy gamma was
+    // `power = 1/midPoint = 2.0`, a midtone-DARKENING curve that only looked
+    // right because the old additive-brightness over-brightened the frame
+    // first. With that over-brightening removed (white-out fix), a pow-2.0 gamma
+    // would crush the levels-stretched midtones into the shadows. We instead use
+    // a gentle BRIGHTENING power (`kToneGamma` < 1), lifting midtones for the
+    // clean, bright lab-scan look (FilmBox/Kodak) without blowing highlights:
+    // pow(v, <1) maps [0,1] → [0,1], so the white point stays pinned at 1.0 and
+    // this remains white-out-safe.
+    let gammaF = CIFilter(name: "CIGammaAdjust")!
+    gammaF.setValue(contrasted, forKey: kCIInputImageKey)
+    gammaF.setValue(Self.kToneGamma, forKey: "inputPower")
+    return gammaF.outputImage ?? contrasted
+  }
+
+  /// Midtone-lift gamma power for the auto-tone curve. < 1 brightens midtones
+  /// (lifts mid-grey ~0.5 → ~0.57) for a clean lab-scan look; > 1 would darken.
+  /// `pow(v, kToneGamma)` keeps [0,1] within [0,1], so it never blows to white.
+  private static let kToneGamma: Float = 0.8
+
+  /// Minimum luminance range used by the auto-tone levels remap. Floors the
+  /// slope (`1/range`) so a flat or near-monochrome capture can't be amplified
+  /// hard enough to clip to pure white — the worst case is a low-contrast but
+  /// still-visible image.
+  private static let kMinToneRange: Float = 0.10
+
+  /// Robust black/white points from a 256-bin RGBA8 histogram (CIAreaHistogram
+  /// output, sRGB-encoded). Returns the bin positions (normalized [0,1]) at the
+  /// 2nd and 98th luminance percentiles, so the brightest/darkest ~2% of pixels
+  /// (hot/dead pixels, specular glints, a black surround) are treated as
+  /// outliers and never define the mapping. A guaranteed minimum separation is
+  /// enforced so a degenerate (single-bin) histogram still yields a sane range.
+  private func robustBlackWhitePoints(histogram data: [UInt8]) -> (black: Float, white: Float) {
+    // Luminance-weighted bin counts (BT.601, matching the legacy CDF).
     var total: Float = 0
     for bin in 0..<256 {
       let r = Float(data[bin * 4]); let g = Float(data[bin * 4 + 1]); let b = Float(data[bin * 4 + 2])
       total += 0.299 * r + 0.587 * g + 0.114 * b
     }
-    var blackPoint: Float = 0
-    var whitePoint: Float = 1.0
-    var cumulative: Float = 0
     let safeTotal = max(total, 1.0)
+
+    var blackBin = 0
+    var whiteBin = 255
+    var foundBlack = false
+    var cumulative: Float = 0
     for bin in 0..<256 {
       let r = Float(data[bin * 4]); let g = Float(data[bin * 4 + 1]); let b = Float(data[bin * 4 + 2])
       cumulative += 0.299 * r + 0.587 * g + 0.114 * b
       let cdf = cumulative / safeTotal
-      if cdf >= 0.01 && blackPoint == 0 { blackPoint = Float(bin) / 255.0 }
-      if cdf >= 0.99 { whitePoint = Float(bin) / 255.0; break }
+      // 2% / 98% robust percentiles (ignore the darkest/brightest ~2% outliers).
+      if !foundBlack && cdf >= 0.02 { blackBin = bin; foundBlack = true }
+      if cdf >= 0.98 { whiteBin = bin; break }
     }
 
-    let midPoint: Float = 0.5
-    let contrast: Float = 1.1
-    let inputRange = whitePoint - blackPoint
-    let exposure = log2(1.0 / max(inputRange, 0.1))
-
-    // Stage 1: brightness + contrast (CIColorControls), as in applyToneCurve.
-    let levels = CIFilter(name: "CIColorControls")!
-    levels.setValue(image, forKey: kCIInputImageKey)
-    levels.setValue(exposure, forKey: kCIInputBrightnessKey)
-    levels.setValue(contrast, forKey: kCIInputContrastKey)
-    guard let leveled = levels.outputImage else { return image }
-
-    // Stage 2: gamma (CIGammaAdjust), power = 1/midPoint.
-    let gammaF = CIFilter(name: "CIGammaAdjust")!
-    gammaF.setValue(leveled, forKey: kCIInputImageKey)
-    gammaF.setValue(1.0 / midPoint, forKey: "inputPower")
-    return gammaF.outputImage ?? leveled
+    // Ensure the white point is meaningfully above the black point even for a
+    // near-flat histogram (kMinToneRange also floors the slope downstream).
+    if whiteBin <= blackBin {
+      whiteBin = min(255, blackBin + Int(Self.kMinToneRange * 255.0))
+    }
+    return (Float(blackBin) / 255.0, Float(whiteBin) / 255.0)
   }
 
   // MARK: Step 7 — user adjustments (UserAdjustments.applyAdjustments order)

@@ -42,9 +42,9 @@ also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 | 0. `maxDimension` (optional) | `CILanczosScaleTransform` to cap longer edge (GPU-tiled) | `Bitmap.createScaledBitmap` BEFORE the FloatArray passes (OOM guard) | ✅ same intent; **approx** scaler |
 | 2. Linearize | `CILinearToSRGBToneCurve` in a linear working-space context | `srgbToLinear` (IEC 61966-2-1) | ✅ equivalent |
 | 3. Invert | `CIColorInvert` *(skipped for `slide`)* | `1 - c` in linear *(skipped for `slide`)* | ✅ exact |
-| 4. Orange mask | film-base sampling on pre-invert (brightest orange, R>G>B, luma>120), else dark-px fallback; `CIColorMatrix` gains + `−0.05·strength` bias *(skipped for `slide`)* | same thresholds/constants; pre-invert channel copy for the base; nearest-neighbour stride downsample *(skipped for `slide`)* | ✅ same math; **approx** downsampler |
+| 4. Orange mask | film-base sampling on pre-invert (most-orange `R−B`, R>G>B, 120<luma<250), else dark-px fallback; densities floored to `kMinBaseDensity`, gains capped at `kMaxMaskGain`; `CIColorMatrix` gains + `−0.05·strength` bias *(skipped for `slide`)* | same thresholds/constants/floors/caps; pre-invert channel copy for the base; nearest-neighbour stride downsample *(skipped for `slide`)* | ✅ same math; **approx** downsampler |
 | 5. Gray-world normalize | `CIAreaAverage` mean, gains clamped [0.5, 2.0] *(slide uses gentle stretch instead)* | same formula/clamp; mean over linear pixels *(slide uses gentle stretch instead)* | ✅ same; tiny mean-domain diff |
-| 6. Auto tone curve | luminance CDF (BT.601), 1%/99% black/white, `brightness=log2(1/range)`, `contrast=1.1`, `gamma=2.0` *(slide uses gentle stretch instead)* | identical thresholds/constants *(slide uses gentle stretch instead)* | ✅ same; see tone-space note |
+| 6. Auto tone curve | luminance CDF (BT.601), **robust 2%/98%** black/white, **bounded levels remap** (slope+bias, range floored at `kMinToneRange`), `contrast=1.1`, **midtone-lift `gamma=kToneGamma=0.8`** *(slide uses gentle stretch instead)* | identical thresholds/constants; remap+contrast+gamma applied in sRGB-encoded space *(slide uses gentle stretch instead)* | ✅ same; see white-out fix + tone-space note |
 | 5–6′. Slide normalize (`slide` only) | `normalizeSlide`: 1%/99% luma points → `CIColorMatrix` slope+bias (NO contrast/gamma), applied to **linear** image | `normalizeSlide`: same 1%/99% points, slope+bias applied in **sRGB-encoded** space (round-trip) | ✅ same algorithm; same linear-vs-sRGB tone-domain split as the negative tone curve (below) |
 | 7. User adjustments | shared Core Image graph (see below) | shared `applyAdjustmentChannels` (see below) | ✅ shared per platform |
 | B&W | `CIColorControls` saturation 0 *(`bw` only; slide stays colour)* | collapse to BT.709 luma *(`bw` only; slide stays colour)* | ✅ both grayscale |
@@ -54,6 +54,98 @@ also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 
 `analyzeHistogram` is an exact match: 256 bins/channel, BT.709 luma, bottom/top-5%
 clip percentages, normalized to sum ≈ 1.
+
+## White-out fix + tone/film-base robustness (this round)
+
+A real C-41 colour negative could process to a **pure-white** image. Root cause
+and the fixes (applied **identically on both platforms**, same constants):
+
+### 1. The blow-out: auto tone curve (`applyToneCorrection`) — PRIMARY FIX
+
+The legacy tone curve computed `brightness = log2(1/range)` and applied it as an
+**additive** offset (iOS `CIColorControls.inputBrightness`; Android additive in
+`toneMap`). When a capture wasn't a perfectly-filled, evenly-lit negative, the
+1%/99% `range` was small, so that offset was large (up to ~3.3) and was *added*
+to every pixel — pushing the whole frame past 1.0 and clipping it to solid white.
+
+**Replaced** with a **bounded levels remap**: a slope+bias mapping the robust
+black/white points to [0,1] (`out = (in − black)/range`). It is monotonic and
+self-normalising — the white point maps to **exactly 1.0**, so the stage can
+*never* drive values above white; the additive blow-out is structurally
+impossible. Specifics (both platforms, shared constants):
+
+- **Robust percentiles** — black/white now come from the **2nd / 98th** luminance
+  percentiles (was 1%/99%), so the brightest/darkest ~2% of pixels (hot/dead
+  pixels, specular glints, a black surround) are treated as outliers and never
+  define the mapping. Helper: `robustBlackWhitePoints`.
+- **Range floor** `kMinToneRange / MIN_TONE_RANGE = 0.10` — floors the slope
+  (≤ 10×) so a flat/low-contrast capture can't be amplified to white; the worst
+  case is a low-contrast but still-visible image, never blank. A degenerate
+  (single-bin) histogram also gets a guaranteed minimum black↔white separation.
+- **Midtone-lift gamma** `kToneGamma / TONE_GAMMA = 0.8` (was `1/midPoint = 2.0`).
+  The legacy pow-2.0 was a midtone-*darkening* curve that only looked right
+  because the old additive brightness over-brightened first; with that removed it
+  would *crush* the levels-stretched midtones. A brightening power < 1 lifts
+  midtones for the clean lab-scan look (FilmBox/Kodak) and stays white-out-safe
+  (`pow(v,<1)` keeps [0,1] within [0,1]). Contrast `1.1` unchanged.
+- **Stage order** is now: bounded levels remap → contrast(1.1) → gamma(0.8).
+  iOS uses `CIColorMatrix` (slope+bias on the **linear** image) → `CIColorControls`
+  → `CIGammaAdjust`; Android applies all three in **sRGB-encoded** space per pixel
+  (`toneMap`). This is the SAME accepted linear-vs-sRGB tone-domain split already
+  documented below for the negative curve and `normalizeSlide` — iOS authoritative.
+
+### 2. Orange-mask division guard (`removeOrangeMask`, `densitiesFromBase`,
+`estimateMaskFromDarkRegions`)
+
+A contaminated or near-white film-base sample could drive a channel density → 0,
+making the downstream `1/density` compensation gain → ∞ and blowing the frame to
+white. Now:
+
+- Every post-invert base channel is **floored to `kMinBaseDensity = 0.05`**
+  *before* the red-normalized ratios are taken (shared `clampDensity`), and the
+  derived green/blue densities are clamped into `[0.05, 1]`. (Replaces the old
+  `max(r, 0.0001)` near-zero floor that still permitted runaway gains.)
+- The final per-channel compensation gains are **capped at `kMaxMaskGain = 3.0`**
+  in `removeOrangeMask`, so even a bounded-but-large ratio can't over-amplify.
+- The blue-normaliser is guarded (`max(blueComp, 1e-4)`).
+
+These bound the mask step end-to-end while still neutralising a real orange cast.
+
+### 3. Better, contamination-resistant film-base sampling (`sampleFilmBaseColor`)
+
+To "sample the orange max-density rebate reliably; resist a bright background":
+
+- **Exclude near-clipped pixels** — candidates now require `120 < luma < 250`
+  (`kBaseMaxLuma / BASE_MAX_LUMA = 250`). The unexposed C-41 base photographs as a
+  *bright-but-not-blown* orange; a fully-clipped region is the light source or a
+  bright surround bleeding around the frame, not the dense base. (Note pure-white
+  surrounds were already rejected by the `R>G+10, G>B+5` orange test; this also
+  drops bright *warm* backgrounds.)
+- **Rank by orange strength `R−B`** (was raw luminance) — the 100 averaged base
+  pixels are now the most-saturated-orange ones, so the dense rebate wins over a
+  merely-bright, weakly-warm background that scraped past the ordering test.
+
+`estimateFilmBaseNeutral` consumes the same improved sampler, so its `{warmth,
+tint}` suggestion benefits too (mapping/gains unchanged).
+
+> The pipeline is now **structurally incapable of an all-white output**: gray-world
+> gains are clamped [0.5, 2.0]; the mask gains are capped at 3.0; the tone remap
+> pins white at exactly 1.0; the lift gamma (`<1`) and contrast (`1.1`) both keep
+> [0,1] within [0,1]. The worst case is a flat-but-usable frame.
+
+**`slide` is byte-for-byte unchanged** (it uses `normalizeSlide`, still 1%/99%,
+untouched, and never calls the orange-mask or negative tone path). **`bw` shares
+the negative tone path**, so it gains the same white-out robustness + cleaner
+tone — an intentional improvement (a B&W negative could blow out the same way),
+not a regression; its grayscale collapse and all other stages are unchanged.
+
+> **⚠ verify on device:** that a real C-41 frame now yields a natural, non-blown
+> positive; that the lift gamma (0.8) and the 2%/98% points give a pleasing
+> (not flat, not crushed) result on a range of exposures; and that the
+> contamination guard still leaves the film-base estimate accurate on scans with
+> a genuine visible rebate. The new constants (`kMinToneRange 0.10`,
+> `kToneGamma 0.8`, `kMinBaseDensity 0.05`, `kMaxMaskGain 3.0`, `kBaseMaxLuma 250`)
+> are conservative first choices and may want tuning against real captures.
 
 ### Slide / E-6 positive mode (`mode === 'slide'`)
 
@@ -83,18 +175,25 @@ BRIGHTEST, most-saturated-orange region (max density base) **before** inversion
 (R > G > B, high luminance):
 
 1. Sample the **pre-invert** image at 10% (iOS: Lanczos render to sRGB bytes;
-   Android: a pre-invert channel copy + 10% stride). Collect bright orange-base
-   candidates: `R > G+10`, `G > B+5`, `luma > 120` (0–255). Average the **100
-   brightest** such pixels → the film-base colour.
+   Android: a pre-invert channel copy + 10% stride). Collect orange-base
+   candidates: `R > G+10`, `G > B+5`, and `120 < luma < 250` (0–255) — the upper
+   bound (`kBaseMaxLuma`) **excludes near-clipped pixels** so a bright surround /
+   light source bleeding around the frame can't contaminate the estimate.
+   Average the **100 most-orange** such pixels, ranked by orange strength `R−B`
+   (was raw luminance) → the film-base colour.
 2. Convert the base to the existing **post-invert density convention**
-   (`density = 1 − base`, normalized to red), so the downstream
-   `CIColorMatrix`/gain-removal step (gains + `−0.05·strength` bias on R,G) is
-   **unchanged** — only the *source of the estimate* improves colour neutrality.
+   (`density = 1 − base`, normalized to red), now with every channel **floored to
+   `kMinBaseDensity = 0.05`** and the ratios clamped into `[0.05, 1]` (white-out
+   guard) before the downstream `CIColorMatrix`/gain-removal step (gains capped at
+   `kMaxMaskGain = 3.0`, + `−0.05·strength` bias on R,G).
 3. If fewer than 100 convincing base pixels are found (e.g. borderless crop,
    B&W mis-tagged, no rebate visible), **fall back** to the legacy darkest-region
-   method (post-invert, BT.601 luma < 51, avg 100 darkest). Deterministic.
+   method (post-invert, BT.601 luma < 51, avg 100 darkest, same density floor).
+   Deterministic.
 
-Both platforms use identical thresholds and the identical density derivation.
+Both platforms use identical thresholds, floors/caps, and the identical density
+derivation. See "White-out fix + tone/film-base robustness" above for the
+rationale.
 
 ## Added in this round (slide, film-base, maxDimension)
 
@@ -116,6 +215,9 @@ algorithmic parity (see the stage table + the two subsections above):
    for tightly-cropped frames with no rebate (no regression vs the old behaviour).
    The orange-detection thresholds (`R>G+10`, `G>B+5`, `luma>120`) are
    conservative first estimates and may want tuning against real captures.
+   *(Updated this round: an upper luma bound of 250 and `R−B` orange-strength
+   ranking were added, plus density floors/gain caps — see "White-out fix +
+   tone/film-base robustness" above.)*
 
 3. **`maxDimension` reduced-resolution fast path** — optional longer-edge cap.
    Android downscales the bitmap before the FloatArray passes (OOM guard); iOS
@@ -140,11 +242,15 @@ existing brightest-orange film-base logic into a shared sampler
 method, so the two features agree on the base region:
 
 - **iOS** linearizes the input, renders a 10% Lanczos downsample to sRGB bytes,
-  and averages the **100 brightest** orange-base pixels (`R>G+10`, `G>B+5`,
-  `luma>120` on 0–255).
+  and averages the **100 most-orange** base pixels (`R>G+10`, `G>B+5`,
+  `120<luma<250` on 0–255), ranked by orange strength `R−B`.
 - **Android** linearizes the decoded bitmap and walks a ~10% nearest-neighbour
-  stride over the pre-invert channels with the **same** thresholds, averaging the
-  same 100 brightest.
+  stride over the pre-invert channels with the **same** thresholds and `R−B`
+  ranking, averaging the same 100.
+
+(The upper luma bound and `R−B` ranking were added this round — see "White-out
+fix + tone/film-base robustness" — to resist a bright surround contaminating the
+base. The mapping/gains below are unchanged.)
 
 Both return the averaged base colour `(R,G,B)` in sRGB-encoded [0,1]; if fewer than
 100 convincing base pixels exist (B&W mis-tag, borderless crop, no rebate) they
@@ -278,11 +384,14 @@ fresh `ProcessResult`).
 
 ## Tone / color-space notes worth a device A/B (not bugs)
 
-- iOS runs `CIColorControls`/`CIGammaAdjust` (tone curve, contrast) in its **linear**
-  working space; the Kotlin applies the tone curve in **sRGB-encoded** space (it
-  round-trips per pixel). Both follow the legacy intent but can differ slightly in
-  midtone roll-off. If a visible mismatch appears, align the Kotlin `toneMap` domain
-  to whichever the legacy app actually produced — iOS is authoritative.
+- The negative tone curve (post white-out fix) is a `CIColorMatrix` slope+bias
+  **levels remap** → `CIColorControls` contrast → `CIGammaAdjust` lift gamma.
+  iOS runs all three in its **linear** working space; the Kotlin applies the same
+  three steps in **sRGB-encoded** space (it round-trips per pixel in `toneMap`).
+  Both follow the same intent but can differ slightly in midtone roll-off. If a
+  visible mismatch appears, align the Kotlin `toneMap` domain to whichever the
+  reference produced — iOS is authoritative. (The black/white points are derived
+  from an sRGB-encoded luminance histogram on both — see the white-out section.)
 - **Slide `normalizeSlide` inherits the same split:** iOS applies the slope+bias
   level stretch via `CIColorMatrix` on the **linear** image (and derives the
   1%/99% points from an sRGB-rendered histogram, exactly like the negative

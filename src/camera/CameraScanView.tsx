@@ -50,17 +50,31 @@ import { readCapabilities, readSnapshot } from '@/camera/cameraController';
 import { capturePhoto } from '@/camera/capturePhoto';
 import { averageFrames } from '../../modules/ai-image-processing';
 import { CAPTURE_FORMATS, CAPTURE_FORMAT_ORDER, type CaptureFormat } from '@/camera/types';
-import { FrameAlignmentOverlay } from '@/features/scan/FrameAlignmentOverlay';
+import { FilmGuideOverlay } from '@/camera/FilmGuideOverlay';
 import { FocusPeakingOverlay } from '@/features/scan/FocusPeakingOverlay';
 import { ManualControlsPanel } from '@/features/scan/ManualControlsPanel';
+
+/**
+ * Metadata accompanying a capture. Currently the source pixel dimensions, which
+ * the Scan screen needs to validate + apply the auto-crop rect. `0` means the
+ * dimensions were not reported (e.g. RAW capture-to-file), in which case the
+ * caller should skip geometry-dependent steps.
+ */
+export interface CaptureMeta {
+  width: number;
+  height: number;
+}
 
 export interface CameraScanViewProps {
   /**
    * Called after a successful capture with a `file://` URI pointing at the
-   * ORIGINAL, unprocessed image in the app cache. The caller (Scan screen /
-   * orchestrator) owns what happens next (e.g. push to the adjust route).
+   * ORIGINAL, unprocessed image in the app cache, plus the capture {@link
+   * CaptureMeta} (pixel dimensions). The caller (Scan screen / orchestrator)
+   * owns what happens next (e.g. auto-crop, then push to the adjust route).
+   *
+   * `meta` is additive: callers that don't need dimensions can ignore it.
    */
-  onCaptured: (originalUri: string) => void;
+  onCaptured: (originalUri: string, meta: CaptureMeta) => void;
   /**
    * Whether the camera session should be active. The Scan screen should set
    * this `false` when the tab is not focused to release the camera.
@@ -151,8 +165,14 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
 
   const [sessionReady, setSessionReady] = useState(false);
 
-  // Live lighting guidance — runs only while the camera is active + idle, and
-  // yields to focus peaking so the session never has two frame outputs at once.
+  // Manual controls are hidden by default to keep the scan screen dead-simple
+  // (Kodak-style). The user reveals the full panel via a small "Manual" toggle.
+  const [showManual, setShowManual] = useState(false);
+
+  // Live lighting + film-framing guidance — runs only while the camera is active
+  // + idle, and yields to focus peaking so the session never has two frame
+  // outputs at once. This single worklet powers BOTH the lighting hint and the
+  // dimmed alignment guide's "fill the frame / ✓ film detected" state.
   const guidance = useCaptureGuidance(
     isActive && sessionReady && !isCapturing && !focusPeakingEnabled,
   );
@@ -213,14 +233,14 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           uris.push(r.uri);
         }
         const averaged = await averageFrames(uris);
-        onCaptured(averaged.uri);
+        onCaptured(averaged.uri, { width: averaged.width, height: averaged.height });
       } else {
         const result = await capturePhoto(photoOutput, {
           format: effectiveFormat,
           flashMode,
           supportsRaw: capabilities.supportsRawCapture,
         });
-        onCaptured(result.uri);
+        onCaptured(result.uri, { width: result.width, height: result.height });
       }
     } catch (err) {
       if (__DEV__) {
@@ -286,8 +306,14 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
         />
       </Pressable>
 
-      {/* Composition guide (also the manual fallback for frame detection) */}
-      {showFrameGuide ? <FrameAlignmentOverlay /> : null}
+      {/* Dimmed alignment guide — the FilmBox-style centre lane. Shown unless
+          the user is focus-peaking (which needs an unobstructed view). It dims
+          the surround so the user fills the lane with the negative, and shows
+          the live "fill the frame / ✓ film detected" state from the single
+          guidance worklet. This replaces the old plain composition outline. */}
+      {showFrameGuide && !focusPeakingEnabled ? (
+        <FilmGuideOverlay state={guidance.guidance.state} message={guidance.guidance.message} />
+      ) : null}
 
       {/* Live focus-peaking overlay — rendered when the frame processor is active */}
       {focusPeakingEnabled && frame.isPeakingActive ? (
@@ -297,49 +323,56 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
         />
       ) : null}
 
-      {/* Live lighting guidance chip */}
-      {guidance.hint ? (
-        <View
-          style={{ position: 'absolute', top: 96, left: 0, right: 0, alignItems: 'center' }}
-          pointerEvents="none">
-          <View
-            style={{
-              backgroundColor: Palette.darkOverlay,
-              paddingHorizontal: Spacing.md,
-              paddingVertical: Spacing.xs,
-              borderRadius: 999,
-            }}>
-            <Text style={{ color: Palette.ink, fontSize: FontSize.sm, fontWeight: '600' }}>
-              {guidance.hint.message}
-            </Text>
+      {/* Lighting WARNING only (blown-out / too-dark / uneven) — the positive
+          "looks good" case is intentionally silent to keep the screen calm.
+          Sits just under the guide's status pill. Hidden while peaking. */}
+      {!focusPeakingEnabled && guidance.hint?.tone === 'warn' ? (
+        <View style={styles.lightingWarnWrap} pointerEvents="none">
+          <View style={styles.lightingWarn}>
+            <Text style={styles.lightingWarnText}>{guidance.hint.message}</Text>
           </View>
         </View>
       ) : null}
 
-      {/* Top controls: flash + format picker */}
+      {/* Top controls — pared back to the essentials (Kodak-simple): a single
+          torch toggle and a small "Manual" disclosure. Flash mode + capture
+          format live inside the manual panel so the default screen stays clean. */}
       <View style={styles.topBar} pointerEvents="box-none">
-        <TopButton
-          label={flashLabel(flashMode)}
-          active={flashMode !== 'off'}
-          disabled={!capabilities.hasFlash}
-          onPress={cycleFlashMode}
-        />
-        <FormatPicker
-          value={effectiveFormat}
-          supportsRaw={capabilities.supportsRawCapture}
-          onChange={setCaptureFormat}
-        />
         <TopButton
           label={torchEnabled ? 'Light On' : 'Light'}
           active={torchEnabled}
           disabled={!capabilities.hasTorch}
           onPress={toggleTorch}
         />
+        <TopButton
+          label={showManual ? 'Done' : 'Manual'}
+          active={showManual}
+          onPress={() => setShowManual((v) => !v)}
+        />
       </View>
 
-      {/* Bottom controls: manual panel + shutter */}
+      {/* Bottom controls: the manual panel is hidden by default and revealed via
+          the "Manual" toggle, so the resting state is just the shutter. */}
       <View style={styles.bottomArea} pointerEvents="box-none">
-        <ManualControlsPanel cameraRef={cameraRef} />
+        {showManual ? (
+          <View style={styles.manualWrap}>
+            {/* Flash + capture format live here now (advanced controls). */}
+            <View style={styles.manualTopRow} pointerEvents="box-none">
+              <TopButton
+                label={flashLabel(flashMode)}
+                active={flashMode !== 'off'}
+                disabled={!capabilities.hasFlash}
+                onPress={cycleFlashMode}
+              />
+              <FormatPicker
+                value={effectiveFormat}
+                supportsRaw={capabilities.supportsRawCapture}
+                onChange={setCaptureFormat}
+              />
+            </View>
+            <ManualControlsPanel cameraRef={cameraRef} />
+          </View>
+        ) : null}
 
         <View style={styles.shutterRow} pointerEvents="box-none">
           <ShutterButton
@@ -597,6 +630,33 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     paddingBottom: Spacing.xl,
     gap: Spacing.md,
+  },
+  manualWrap: {
+    gap: Spacing.md,
+  },
+  manualTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  lightingWarnWrap: {
+    position: 'absolute',
+    top: Spacing.xxl + Spacing.lg + 36,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  lightingWarn: {
+    backgroundColor: Palette.darkOverlay,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    borderRadius: Radius.full,
+  },
+  lightingWarnText: {
+    color: Palette.ink,
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
   },
   shutterRow: {
     alignItems: 'center',

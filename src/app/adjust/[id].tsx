@@ -4,26 +4,37 @@
  * Route: adjust/[id]  (id = ScannedImage UUID from storage)
  * Presented as a modal stack push from the Scan tab after capture.
  *
+ * DESIGN — progressive disclosure (effortless at a glance, power on demand):
+ *
+ *   PRIMARY (always visible):
+ *     - the live preview, with a before/after drag-to-reveal compare;
+ *     - the film **Looks** row — the differentiating control;
+ *     - three primary sliders: Exposure / Warmth / Contrast.
+ *
+ *   ADVANCED (one collapsible, collapsed by default):
+ *     - actionable histogram insight (suggestFromLuma, one-tap apply);
+ *     - the live <Histogram>;
+ *     - "Auto WB from film base" (estimateFilmBaseNeutral);
+ *     - fine sliders: Saturation / Highlights / Shadows / Vibrance;
+ *     - Pro AI toggles (aiColor / aiDustRemoval) inside a <ProGate>;
+ *     - Reset adjustments.
+ *
+ * Nothing was removed — everything above is still reachable. The pipeline
+ * wiring (mergeParams, the LUT `lut` param, Auto-WB, the live histogram +
+ * insight, and the before/after compare) is unchanged.
+ *
  * Wiring (capstone integration):
  *   - The captured ScannedImage is read from useGalleryStore by id.
  *   - usePipeline({ imageId, originalUri, initialParams }) drives a debounced
  *     live preview (previewUri / isProcessing) and the final commit().
  *   - <AdjustPreview> renders the positive preview inside <WatermarkOverlay>.
- *   - <AdjustSlider> rows bind exposure / warmth / contrast to setParam().
- *   - AI toggles (aiColor / aiDustRemoval) live inside a <ProGate>.
+ *   - <AdjustSlider> rows bind params to setParam().
  *   - "Done": await pipeline.commit() → reload gallery → replace to gallery.
  *     pipeline.fallbackNotice (Android DNG) and pipeline.error are surfaced.
+ *   - AUTO CROP: a cropRect approved on the Scan screen is passed as a JSON
+ *     query param and merged into the initial pipeline params.
  *
- * Task #13 additions:
- *   - LIVE HISTOGRAM: analyzeHistogram() is called on previewUri (debounced
- *     ~400 ms, race-guarded). The Insights <Histogram> component renders
- *     compactly below the preview. Loading / empty states are handled.
- *   - AUTO CROP: if the Scan screen detected a frame boundary and the user
- *     approved it, cropRect is passed as a JSON query param and applied to
- *     the initial pipeline params.
- *
- * Algorithm parity: legacy-ios/docs/PRODUCT_UI_SPEC.md + DESIGN_UPDATES.md
- *   (three orange sliders + Pro AI toggles + Done → Gallery).
+ * Algorithm parity: legacy-ios/docs/PRODUCT_UI_SPEC.md + DESIGN_UPDATES.md.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -54,6 +65,7 @@ import { useGalleryStore } from '@/state/galleryStore';
 import {
   AdjustPreview,
   AdjustSlider,
+  AdvancedSection,
   AIToggleRow,
   BeforeAfterCompare,
   FilmProfilePicker,
@@ -245,14 +257,19 @@ function AdjustScreenBody({
   const [isCommitting, setIsCommitting] = useState(false);
   const [profileId, setProfileId] = useState<string>(NEUTRAL_PROFILE_ID);
   const [compareMode, setCompareMode] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const { mergeParams, setParam, params: pipelineParams } = pipeline;
 
   // Selecting a film/lab look resets the 7 user-adjustment sliders to that
-  // profile's values (applied over neutral), which the live preview re-renders.
+  // profile's values (applied over neutral) AND carries the profile's native
+  // colour LUT (frontier/portra/…) through to the engine, which the live
+  // preview re-renders. Looks without a LUT clear any previously-applied one.
   const handleSelectProfile = useCallback(
     (profile: FilmProfile) => {
       setProfileId(profile.id);
       const neutral: FullProcessParams = {
-        ...pipeline.params,
+        ...pipelineParams,
         exposure: 0,
         warmth: 0,
         contrast: 0,
@@ -262,7 +279,7 @@ function AdjustScreenBody({
         vibrance: 0,
       };
       const looked = applyFilmProfile(neutral, profile.id);
-      pipeline.mergeParams({
+      mergeParams({
         exposure: looked.exposure,
         warmth: looked.warmth,
         contrast: looked.contrast,
@@ -270,9 +287,10 @@ function AdjustScreenBody({
         highlights: looked.highlights,
         shadows: looked.shadows,
         vibrance: looked.vibrance,
+        lut: looked.lut,
       });
     },
-    [pipeline],
+    [mergeParams, pipelineParams],
   );
 
   // Live histogram on the current preview URI (debounced, race-guarded).
@@ -287,21 +305,21 @@ function AdjustScreenBody({
 
   const handleApplySuggestion = useCallback(() => {
     if (suggestion == null) return;
-    const cur = pipeline.params;
+    const cur = pipelineParams;
     const p = suggestion.patch;
     const add = (key: keyof SuggestionPatch, base: number | undefined) =>
       clampParam(key, (base ?? 0) + (p[key] ?? 0));
-    pipeline.mergeParams({
+    mergeParams({
       exposure: add('exposure', cur.exposure),
       warmth: add('warmth', cur.warmth),
       contrast: add('contrast', cur.contrast),
       saturation: add('saturation', cur.saturation),
       highlights: add('highlights', cur.highlights),
       shadows: add('shadows', cur.shadows),
-      vibrance: add('vibrance', cur.vibrance)
+      vibrance: add('vibrance', cur.vibrance),
     });
     setDismissedSuggestionId(suggestion.id);
-  }, [suggestion, pipeline]);
+  }, [suggestion, mergeParams, pipelineParams]);
 
   // One-tap white balance: sample the unexposed film base (rebate) and set the
   // warmth slider to neutralise its cast — a mobile take on IT8/grey-card
@@ -312,7 +330,7 @@ function AdjustScreenBody({
     try {
       const wb = await estimateFilmBaseNeutral(originalUri);
       if (wb.found) {
-        pipeline.mergeParams({ warmth: clampParam('warmth', wb.warmth) });
+        mergeParams({ warmth: clampParam('warmth', wb.warmth) });
       } else {
         Alert.alert(
           'No film base found',
@@ -324,7 +342,16 @@ function AdjustScreenBody({
     } finally {
       setAutoWbBusy(false);
     }
-  }, [originalUri, pipeline]);
+  }, [originalUri, mergeParams]);
+
+  // Reset everything: params back to neutral, Look back to Natural, and collapse
+  // the Advanced disclosure so the screen returns to its effortless default.
+  const handleReset = useCallback(() => {
+    pipeline.resetParams();
+    setProfileId(NEUTRAL_PROFILE_ID);
+    setDismissedSuggestionId(null);
+    setAdvancedOpen(false);
+  }, [pipeline]);
 
   // Surface hard pipeline errors as an alert (preview + commit failures).
   useEffect(() => {
@@ -400,78 +427,13 @@ function AdjustScreenBody({
           />
         )}
 
-        {/* Live histogram — shown below the preview when data is available.
-            Uses the Insights <Histogram> component (compact height 80). */}
-        <View style={styles.histogramContainer}>
-          {histogram !== null ? (
-            <Histogram
-              histogram={histogram}
-              height={80}
-              style={styles.histogramChart}
-            />
-          ) : isHistogramLoading ? (
-            <View style={[styles.histogramPlaceholder, { backgroundColor: theme.backgroundCard }]}>
-              <Text style={[styles.histogramPlaceholderText, { color: theme.textSecondary }]}>
-                Analysing…
-              </Text>
-            </View>
-          ) : (
-            // No preview yet — show a subtle placeholder so the layout
-            // doesn't shift when the histogram arrives.
-            <View style={[styles.histogramPlaceholder, { backgroundColor: theme.backgroundCard }]}>
-              <Text style={[styles.histogramPlaceholderText, { color: theme.textSecondary }]}>
-                Histogram
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* Actionable suggestion from the live histogram — one-tap apply */}
-        {suggestion != null ? (
-          <View style={[styles.suggestionChip, { backgroundColor: theme.backgroundCard, borderColor: theme.border }]}>
-            <Text style={[styles.suggestionText, { color: theme.text }]} numberOfLines={2}>
-              {suggestion.title}
-            </Text>
-            <View style={styles.suggestionActions}>
-              <Pressable
-                onPress={() => setDismissedSuggestionId(suggestion.id)}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel="Dismiss suggestion">
-                <Text style={[styles.suggestionDismiss, { color: theme.textSecondary }]}>✕</Text>
-              </Pressable>
-              <Pressable
-                onPress={handleApplySuggestion}
-                accessibilityRole="button"
-                accessibilityLabel={`Apply: ${suggestion.title}`}
-                style={({ pressed }) => [
-                  styles.suggestionApply,
-                  { backgroundColor: theme.accent },
-                  pressed && { opacity: 0.8 }
-                ]}>
-                <Text style={[styles.suggestionApplyText, { color: theme.accentText }]}>Apply</Text>
-              </Pressable>
-            </View>
-          </View>
-        ) : null}
-
-        {/* Film / lab look */}
+        {/* ───────────── PRIMARY: Looks ───────────── */}
         <SectionHeader title="Look" />
         <View style={styles.profilePicker}>
           <FilmProfilePicker selectedId={profileId} onSelect={handleSelectProfile} />
         </View>
-        <View style={styles.autoWbRow}>
-          <Button
-            variant="secondary"
-            size="sm"
-            loading={autoWbBusy}
-            onPress={() => void handleAutoWhiteBalance()}>
-            Auto WB from film base
-          </Button>
-        </View>
 
-        {/* Adjustments */}
-        <SectionHeader title="Adjustments" />
+        {/* ───────────── PRIMARY: three core sliders ───────────── */}
         <Card padding="md" elevated style={styles.card}>
           <AdjustSlider
             label="Exposure"
@@ -479,7 +441,7 @@ function AdjustScreenBody({
             min={PARAM_RANGES.exposure.min}
             max={PARAM_RANGES.exposure.max}
             step={PARAM_RANGES.exposure.step}
-            onChange={(v) => pipeline.setParam('exposure', v)}
+            onChange={(v) => setParam('exposure', v)}
           />
           <AdjustSlider
             label="Warmth"
@@ -487,7 +449,7 @@ function AdjustScreenBody({
             min={PARAM_RANGES.warmth.min}
             max={PARAM_RANGES.warmth.max}
             step={PARAM_RANGES.warmth.step}
-            onChange={(v) => pipeline.setParam('warmth', v)}
+            onChange={(v) => setParam('warmth', v)}
           />
           <AdjustSlider
             label="Contrast"
@@ -495,36 +457,148 @@ function AdjustScreenBody({
             min={PARAM_RANGES.contrast.min}
             max={PARAM_RANGES.contrast.max}
             step={PARAM_RANGES.contrast.step}
-            onChange={(v) => pipeline.setParam('contrast', v)}
+            onChange={(v) => setParam('contrast', v)}
           />
         </Card>
 
-        {/* AI processing — gated behind Pro */}
-        <SectionHeader title="AI Processing" right={<ProBadge size="sm" />} />
-        <ProGate featureName="AI Processing">
+        {/* ───────────── ADVANCED: everything else, collapsed by default ───────────── */}
+        <AdvancedSection expanded={advancedOpen} onToggle={() => setAdvancedOpen((o) => !o)}>
+          {/* Actionable suggestion from the live histogram — one-tap apply */}
+          {suggestion != null ? (
+            <View
+              style={[
+                styles.suggestionChip,
+                { backgroundColor: theme.backgroundCard, borderColor: theme.border },
+              ]}>
+              <Text style={[styles.suggestionText, { color: theme.text }]} numberOfLines={2}>
+                {suggestion.title}
+              </Text>
+              <View style={styles.suggestionActions}>
+                <Pressable
+                  onPress={() => setDismissedSuggestionId(suggestion.id)}
+                  hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Dismiss suggestion">
+                  <Text style={[styles.suggestionDismiss, { color: theme.textSecondary }]}>✕</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleApplySuggestion}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Apply: ${suggestion.title}`}
+                  style={({ pressed }) => [
+                    styles.suggestionApply,
+                    { backgroundColor: theme.accent },
+                    pressed && { opacity: 0.8 },
+                  ]}>
+                  <Text style={[styles.suggestionApplyText, { color: theme.accentText }]}>
+                    Apply
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
+          {/* Live histogram — uses the Insights <Histogram> component (height 80). */}
+          <View style={styles.histogramContainer}>
+            {histogram !== null ? (
+              <Histogram histogram={histogram} height={80} style={styles.histogramChart} />
+            ) : isHistogramLoading ? (
+              <View
+                style={[styles.histogramPlaceholder, { backgroundColor: theme.backgroundCard }]}>
+                <Text style={[styles.histogramPlaceholderText, { color: theme.textSecondary }]}>
+                  Analysing…
+                </Text>
+              </View>
+            ) : (
+              // No preview yet — subtle placeholder so the layout doesn't shift.
+              <View
+                style={[styles.histogramPlaceholder, { backgroundColor: theme.backgroundCard }]}>
+                <Text style={[styles.histogramPlaceholderText, { color: theme.textSecondary }]}>
+                  Histogram
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* One-tap white balance from the film base */}
+          <View style={styles.autoWbRow}>
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={autoWbBusy}
+              onPress={() => void handleAutoWhiteBalance()}>
+              Auto WB from film base
+            </Button>
+          </View>
+
+          {/* Fine adjustments */}
+          <SectionHeader title="Fine adjustments" style={styles.advancedHeader} />
           <Card padding="md" elevated style={styles.card}>
-            <AIToggleRow
-              label="AI Color Reconstruction"
-              description="Advanced colour correction for accurate film reproduction."
-              value={pipeline.params.aiColor ?? false}
-              onValueChange={(v) => pipeline.setParam('aiColor', v)}
+            <AdjustSlider
+              label="Saturation"
+              value={pipeline.params.saturation ?? 0}
+              min={PARAM_RANGES.saturation.min}
+              max={PARAM_RANGES.saturation.max}
+              step={PARAM_RANGES.saturation.step}
+              onChange={(v) => setParam('saturation', v)}
             />
-            <View style={[styles.divider, { backgroundColor: theme.border }]} />
-            <AIToggleRow
-              label="AI Dust Removal"
-              description="Automatically clean up dust and scratches."
-              value={pipeline.params.aiDustRemoval ?? false}
-              onValueChange={(v) => pipeline.setParam('aiDustRemoval', v)}
+            <AdjustSlider
+              label="Highlights"
+              value={pipeline.params.highlights ?? 0}
+              min={PARAM_RANGES.highlights.min}
+              max={PARAM_RANGES.highlights.max}
+              step={PARAM_RANGES.highlights.step}
+              onChange={(v) => setParam('highlights', v)}
+            />
+            <AdjustSlider
+              label="Shadows"
+              value={pipeline.params.shadows ?? 0}
+              min={PARAM_RANGES.shadows.min}
+              max={PARAM_RANGES.shadows.max}
+              step={PARAM_RANGES.shadows.step}
+              onChange={(v) => setParam('shadows', v)}
+            />
+            <AdjustSlider
+              label="Vibrance"
+              value={pipeline.params.vibrance ?? 0}
+              min={PARAM_RANGES.vibrance.min}
+              max={PARAM_RANGES.vibrance.max}
+              step={PARAM_RANGES.vibrance.step}
+              onChange={(v) => setParam('vibrance', v)}
             />
           </Card>
-        </ProGate>
 
-        {/* Reset adjustments */}
-        <View style={styles.resetRow}>
-          <Button variant="secondary" size="sm" onPress={pipeline.resetParams}>
-            Reset adjustments
-          </Button>
-        </View>
+          {/* AI processing — gated behind Pro */}
+          <SectionHeader
+            title="AI Processing"
+            right={<ProBadge size="sm" />}
+            style={styles.advancedHeader}
+          />
+          <ProGate featureName="AI Processing">
+            <Card padding="md" elevated style={styles.card}>
+              <AIToggleRow
+                label="AI Color Reconstruction"
+                description="Advanced colour correction for accurate film reproduction."
+                value={pipeline.params.aiColor ?? false}
+                onValueChange={(v) => setParam('aiColor', v)}
+              />
+              <View style={[styles.divider, { backgroundColor: theme.border }]} />
+              <AIToggleRow
+                label="AI Dust Removal"
+                description="Automatically clean up dust and scratches."
+                value={pipeline.params.aiDustRemoval ?? false}
+                onValueChange={(v) => setParam('aiDustRemoval', v)}
+              />
+            </Card>
+          </ProGate>
+
+          {/* Reset everything */}
+          <View style={styles.resetRow}>
+            <Button variant="secondary" size="sm" onPress={handleReset}>
+              Reset adjustments
+            </Button>
+          </View>
+        </AdvancedSection>
       </ScrollView>
     </Screen>
   );
@@ -581,7 +655,7 @@ const styles = StyleSheet.create({
     // Full-bleed horizontal scroll: cancel the content's horizontal padding so
     // the chip row reaches the screen edges and scrolls naturally.
     marginHorizontal: -Spacing.md,
-    marginBottom: Spacing.sm,
+    marginBottom: Spacing.md,
   },
   previewHeaderRow: {
     flexDirection: 'row',
@@ -590,12 +664,19 @@ const styles = StyleSheet.create({
   },
   autoWbRow: {
     flexDirection: 'row',
-    marginBottom: Spacing.sm,
+    marginTop: Spacing.sm,
+    marginBottom: Spacing.xs,
   },
   compareWrap: {
     height: 320,
     borderRadius: 12,
     overflow: 'hidden',
+  },
+  // The Advanced disclosure renders its own top rule + label, so section
+  // headers nested inside it don't need the default top padding.
+  advancedHeader: {
+    paddingHorizontal: 0,
+    paddingTop: Spacing.md,
   },
   suggestionChip: {
     flexDirection: 'row',
