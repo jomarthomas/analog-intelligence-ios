@@ -44,3 +44,6 @@ legacy-ios/**/xcuserdata/
 legacy-ios/**/build/
 legacy-ios/**/DerivedData/
 legacy-ios/**/*.xcuserstate
+
+# Local Expo module Android build artifacts (generated)
+modules/*/android/build/

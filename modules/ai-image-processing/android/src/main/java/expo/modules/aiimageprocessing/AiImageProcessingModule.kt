@@ -27,7 +27,7 @@ import kotlin.math.sqrt
  *
  * This is an equivalent reimplementation of the iOS Core Image pipeline
  * (modules/ai-image-processing/ios/AiImageProcessingModule.swift), which itself
- * ports legacy-ios/Processing/Pipeline/*. Android has no Core Image, so the
+ * ports the legacy-ios/Processing/Pipeline sources. Android has no Core Image, so the
  * stages are reproduced with framework Bitmap pixel operations and per-pixel
  * math chosen to match the iOS filter semantics as closely as feasible.
  *
@@ -140,8 +140,8 @@ class AiImageProcessingModule : Module() {
   /** Decode a `file://`, plain-path, or `content://` URI into an ARGB_8888 bitmap. */
   private fun decodeBitmap(uri: String): Bitmap? {
     val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
-    val resolver get() = appContext.reactContext?.contentResolver
-    val decoded: Bitmap? = try {
+    val resolver = appContext.reactContext?.contentResolver
+    val decoded: Bitmap = try {
       when {
         uri.startsWith("file://") -> BitmapFactory.decodeFile(Uri.parse(uri).path, opts)
         uri.contains("://") ->
