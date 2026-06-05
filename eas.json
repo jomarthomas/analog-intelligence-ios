@@ -1,0 +1,44 @@
+{
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": { "simulator": false }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "ios": { "simulator": false }
+    },
+    "production": {
+      "autoIncrement": true,
+      "channel": "production",
+      "env": {
+        "//": "Real keys come from EAS secrets, NOT this file. Create them with:",
+        "// ADMOB_IOS_APP_ID": "eas secret:create --name ADMOB_IOS_APP_ID --value ca-app-pub-XXXX~YYYY",
+        "// ADMOB_ANDROID_APP_ID": "eas secret:create --name ADMOB_ANDROID_APP_ID --value ...",
+        "// ADMOB_BANNER_IOS": "eas secret:create --name ADMOB_BANNER_IOS --value ...",
+        "// ADMOB_BANNER_ANDROID": "eas secret:create --name ADMOB_BANNER_ANDROID --value ...",
+        "// REVENUECAT_IOS_KEY": "eas secret:create --name REVENUECAT_IOS_KEY --value appl_...",
+        "// REVENUECAT_ANDROID_KEY": "eas secret:create --name REVENUECAT_ANDROID_KEY --value goog_..."
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "REPLACE_WITH_YOUR_APPLE_ID_EMAIL",
+        "ascAppId": "REPLACE_WITH_APP_STORE_CONNECT_APP_ID",
+        "appleTeamId": "REPLACE_WITH_PAID_TEAM_ID"
+      },
+      "android": {
+        "serviceAccountKeyPath": "./google-play-service-account.json",
+        "track": "internal"
+      }
+    }
+  }
+}

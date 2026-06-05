@@ -14,12 +14,22 @@ import mobileAds from 'react-native-google-mobile-ads';
 
 import { addBreadcrumb, captureException } from '@/lib/telemetry';
 
+import { gatherAdsConsent } from './consent';
+
 let started = false;
 
-/** Initialise the Google Mobile Ads SDK once. No-op on web / repeat calls. */
+/**
+ * Initialise the Google Mobile Ads SDK once. No-op on web / repeat calls.
+ *
+ * Order matters for App Store / Play compliance: gather UMP (GDPR) consent
+ * FIRST, then initialise the SDK. Both steps are individually guarded and can
+ * never throw, so ad setup can't crash app startup.
+ */
 export async function initAds(): Promise<void> {
   if (started || Platform.OS === 'web') return;
   started = true;
+  // Consent before init — required before serving ads in regulated regions.
+  await gatherAdsConsent();
   try {
     await mobileAds().initialize();
     addBreadcrumb({ category: 'ads', message: 'AdMob SDK initialised', level: 'info' });
