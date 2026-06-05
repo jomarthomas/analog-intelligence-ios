@@ -218,7 +218,11 @@ export interface FrameDetectionResult {
   };
   /**
    * Detection confidence in [0, 1]. Maps to `VNRectangleObservation.confidence`
-   * on iOS. On Android this is always 0 (heuristic path, see TODO in Kotlin).
+   * on iOS. On Android it is a normalized score from the luminance-edge
+   * heuristic (border-vs-interior edge energy): a value in (0, 1] when a frame
+   * is found, and exactly 0 when none is (`found: false`). It is therefore not
+   * directly comparable to the iOS Vision confidence — treat it as a relative
+   * quality hint, not a probability. See the TODO in the Kotlin source.
    */
   confidence: number;
 }

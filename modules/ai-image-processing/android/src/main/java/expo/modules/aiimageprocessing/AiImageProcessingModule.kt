@@ -2,6 +2,8 @@ package expo.modules.aiimageprocessing
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import expo.modules.kotlin.exception.CodedException
@@ -150,15 +152,65 @@ class AiImageProcessingModule : Module() {
       null
     } ?: return null
 
+    // Apply EXIF orientation so captures are oriented identically to iOS, whose
+    // CIImage(contentsOf:options:[.applyOrientationProperty:true]) auto-rotates.
+    // VisionCamera writes orientation into EXIF rather than baking it into the
+    // pixels, so without this the Android engine would process (and export) some
+    // frames sideways while iOS rendered them upright — a visible parity gap.
+    val oriented = applyExifOrientation(decoded, uri)
+
     // Normalize to ARGB_8888 so `getPixels` returns correct 32-bit colour.
     // We only ever read from the source via getPixels, so mutability is not
     // required; the processed output is always a fresh bitmap.
-    if (decoded.config == Bitmap.Config.ARGB_8888) {
-      return decoded
+    if (oriented.config == Bitmap.Config.ARGB_8888) {
+      return oriented
     }
-    val converted = decoded.copy(Bitmap.Config.ARGB_8888, false)
-    decoded.recycle()
+    val converted = oriented.copy(Bitmap.Config.ARGB_8888, false)
+    oriented.recycle()
     return converted
+  }
+
+  /**
+   * Rotate/flip a freshly-decoded bitmap to honour its EXIF orientation tag,
+   * mirroring iOS's `.applyOrientationProperty`. Reads EXIF from the same
+   * file/stream the bitmap was decoded from. Uses the framework
+   * `android.media.ExifInterface` (no extra dependency). On ANY failure — no
+   * EXIF, unreadable URI, unsupported tag, or OOM during rotation — it returns
+   * the input bitmap unchanged, so this is never worse than the prior
+   * no-orientation behaviour.
+   */
+  private fun applyExifOrientation(bitmap: Bitmap, uri: String): Bitmap {
+    val orientation = try {
+      val exif = when {
+        uri.startsWith("file://") -> Uri.parse(uri).path?.let { ExifInterface(it) }
+        uri.contains("://") -> appContext.reactContext?.contentResolver
+          ?.openInputStream(Uri.parse(uri))?.use { ExifInterface(it) }
+        else -> ExifInterface(uri)
+      } ?: return bitmap
+      exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    } catch (e: Exception) {
+      return bitmap
+    }
+
+    val matrix = Matrix()
+    when (orientation) {
+      ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+      ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+      ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+      ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+      ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+      ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.postRotate(90f); matrix.postScale(-1f, 1f) }
+      ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.postRotate(270f); matrix.postScale(-1f, 1f) }
+      else -> return bitmap // NORMAL / UNDEFINED — nothing to do.
+    }
+
+    return try {
+      val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+      if (rotated != bitmap) bitmap.recycle()
+      rotated
+    } catch (e: OutOfMemoryError) {
+      bitmap
+    }
   }
 
   // MARK: - Pipeline (mirrors ImageProcessor.processNegative steps 2–8)
@@ -397,11 +449,35 @@ class AiImageProcessingModule : Module() {
   // MARK: Step 7 — user adjustments (UserAdjustments.applyAdjustments order)
 
   private fun applyUserAdjustments(r: FloatArray, g: FloatArray, b: FloatArray, p: ProcessParams) {
+    applyAdjustmentChannels(
+      r, g, b,
+      exposure = p.exposure, highlights = p.highlights, shadows = p.shadows,
+      contrast = p.contrast, warmth = p.warmth, saturation = p.saturation, vibrance = p.vibrance
+    )
+  }
+
+  /**
+   * The seven user-facing slider adjustments applied to LINEAR-light channels,
+   * in the legacy Core Image order (exposure → highlights+shadows → contrast →
+   * warmth → saturation → vibrance).
+   *
+   * Shared by the full pipeline (Step 7) and the Adjust-screen fast path
+   * (`runAdjustmentsOnly`) so a live preview uses the IDENTICAL math as the
+   * committed render — mirroring iOS, where both code paths drive the same Core
+   * Image graph in the same linear working space. Input and output are linear;
+   * steps 2 and 3 round-trip through sRGB internally to match the display-space
+   * behaviour of CIHighlightShadowAdjust / CIColorControls.
+   */
+  private fun applyAdjustmentChannels(
+    r: FloatArray, g: FloatArray, b: FloatArray,
+    exposure: Double, highlights: Double, shadows: Double,
+    contrast: Double, warmth: Double, saturation: Double, vibrance: Double
+  ) {
     val n = r.size
 
     // 1. Exposure — CIExposureAdjust: linear multiply by 2^EV.
-    if (p.exposure != 0.0) {
-      val gain = 2.0.pow(p.exposure).toFloat()
+    if (exposure != 0.0) {
+      val gain = 2.0.pow(exposure).toFloat()
       for (i in 0 until n) { r[i] *= gain; g[i] *= gain; b[i] *= gain }
     }
 
@@ -409,9 +485,9 @@ class AiImageProcessingModule : Module() {
     //    Legacy: highlightAmount = 1 - highlights (lower => darker highlights),
     //    shadowAmount = shadows (higher => lifted shadows). We apply a smooth
     //    luminance-weighted lift/compress in display space.
-    if (p.highlights != 0.0 || p.shadows != 0.0) {
-      val hi = (1.0 - p.highlights).toFloat() // around 1.0
-      val sh = p.shadows.toFloat()            // around 0.0
+    if (highlights != 0.0 || shadows != 0.0) {
+      val hi = (1.0 - highlights).toFloat() // around 1.0
+      val sh = shadows.toFloat()            // around 0.0
       for (i in 0 until n) {
         var rs = linearToSrgb(clamp01(r[i]))
         var gs = linearToSrgb(clamp01(g[i]))
@@ -430,8 +506,8 @@ class AiImageProcessingModule : Module() {
     }
 
     // 3. Contrast — CIColorControls: contrast = 1 + value, about mid-grey 0.5.
-    if (p.contrast != 0.0) {
-      val c = (1.0 + p.contrast).toFloat()
+    if (contrast != 0.0) {
+      val c = (1.0 + contrast).toFloat()
       for (i in 0 until n) {
         r[i] = srgbToLinear(clamp01((linearToSrgb(clamp01(r[i])) - 0.5f) * c + 0.5f))
         g[i] = srgbToLinear(clamp01((linearToSrgb(clamp01(g[i])) - 0.5f) * c + 0.5f))
@@ -442,21 +518,21 @@ class AiImageProcessingModule : Module() {
     // 4. Warmth — CITemperatureAndTint: neutral 6500 + value*2000 (4500..8500K).
     //    Approximated as per-channel scale: warmer boosts R, cuts B; cooler the
     //    inverse. Operates in linear light.
-    if (p.warmth != 0.0) {
-      val warm = p.warmth.toFloat() // -1..+1
+    if (warmth != 0.0) {
+      val warm = warmth.toFloat() // -1..+1
       val rScale = 1f + 0.2f * warm
       val bScale = 1f - 0.2f * warm
       for (i in 0 until n) { r[i] *= rScale; b[i] *= bScale }
     }
 
     // 5. Saturation — CIColorControls: saturation = 1 + value (BT.601 luma pivot).
-    if (p.saturation != 0.0) {
-      applySaturation(r, g, b, (1.0 + p.saturation).toFloat())
+    if (saturation != 0.0) {
+      applySaturation(r, g, b, (1.0 + saturation).toFloat())
     }
 
     // 6. Vibrance — CIVibrance: selective saturation, stronger on muted colours.
-    if (p.vibrance != 0.0) {
-      applyVibrance(r, g, b, p.vibrance.toFloat())
+    if (vibrance != 0.0) {
+      applyVibrance(r, g, b, vibrance.toFloat())
     }
   }
 
@@ -569,10 +645,14 @@ class AiImageProcessingModule : Module() {
 
   /**
    * Applies only the seven user-facing slider adjustments to a decoded sRGB
-   * bitmap. Operates entirely in display-referred sRGB space (0..255 per
-   * channel) because the source is already an encoded positive — no need for
-   * linear-light round-trips here. The filter order mirrors iOS Core Image
-   * (exposure → highlights+shadows → contrast → warmth → saturation → vibrance).
+   * positive, for the live Adjust-screen preview.
+   *
+   * The source is linearized first so the slider math runs in the SAME
+   * linear-light space as the full pipeline's Step 7 (`applyAdjustmentChannels`)
+   * — and as iOS, whose Core Image context is linear for both the pipeline and
+   * the fast path. Sharing `applyAdjustmentChannels` guarantees the preview is
+   * a faithful approximation of the committed `processNegative` render rather
+   * than a separately-tuned display-space version that drifts from it.
    *
    * Returns a new ARGB_8888 Bitmap; the caller owns both source and result.
    */
@@ -584,91 +664,30 @@ class AiImageProcessingModule : Module() {
     val argb = IntArray(n)
     source.getPixels(argb, 0, w, 0, 0, w, h)
 
-    // Work in float [0,1] display-space (no linearize — source is already sRGB positive).
+    // Linearize the already-encoded positive (sRGB → linear), matching the
+    // working space of the full pipeline's user-adjustment stage.
     val r = FloatArray(n)
     val g = FloatArray(n)
     val b = FloatArray(n)
     for (i in 0 until n) {
       val px = argb[i]
-      r[i] = ((px shr 16) and 0xFF) / 255f
-      g[i] = ((px shr 8)  and 0xFF) / 255f
-      b[i] = (px          and 0xFF) / 255f
+      r[i] = srgbToLinear(((px shr 16) and 0xFF) / 255f)
+      g[i] = srgbToLinear(((px shr 8)  and 0xFF) / 255f)
+      b[i] = srgbToLinear((px          and 0xFF) / 255f)
     }
 
-    // 1. Exposure — CIExposureAdjust: multiply by 2^EV in display space
-    //    (sRGB-encoded values, matching how CIExposureAdjust behaves on a
-    //    display-referred image that hasn't been explicitly linearized).
-    if (p.exposure != 0.0) {
-      val gain = 2.0.pow(p.exposure).toFloat()
-      for (i in 0 until n) { r[i] = clamp01(r[i] * gain); g[i] = clamp01(g[i] * gain); b[i] = clamp01(b[i] * gain) }
-    }
+    applyAdjustmentChannels(
+      r, g, b,
+      exposure = p.exposure, highlights = p.highlights, shadows = p.shadows,
+      contrast = p.contrast, warmth = p.warmth, saturation = p.saturation, vibrance = p.vibrance
+    )
 
-    // 2. Highlights & shadows — approximation of CIHighlightShadowAdjust.
-    //    highlightAmount = 1 - highlights; shadowAmount = shadows.
-    if (p.highlights != 0.0 || p.shadows != 0.0) {
-      val hi = (1.0 - p.highlights).toFloat()
-      val sh = p.shadows.toFloat()
-      for (i in 0 until n) {
-        val lum = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i]
-        val shadowW = 1f - lum
-        val highW   = lum
-        val lift  = sh * 0.5f * shadowW
-        val scale = 1f + (hi - 1f) * highW
-        r[i] = clamp01((r[i] + lift) * scale)
-        g[i] = clamp01((g[i] + lift) * scale)
-        b[i] = clamp01((b[i] + lift) * scale)
-      }
-    }
-
-    // 3. Contrast — CIColorControls: (v - 0.5) * (1 + contrast) + 0.5.
-    if (p.contrast != 0.0) {
-      val c = (1.0 + p.contrast).toFloat()
-      for (i in 0 until n) {
-        r[i] = clamp01((r[i] - 0.5f) * c + 0.5f)
-        g[i] = clamp01((g[i] - 0.5f) * c + 0.5f)
-        b[i] = clamp01((b[i] - 0.5f) * c + 0.5f)
-      }
-    }
-
-    // 4. Warmth — CITemperatureAndTint approximation. neutral = 6500 + value*2000.
-    if (p.warmth != 0.0) {
-      val warm = p.warmth.toFloat()
-      val rScale = 1f + 0.2f * warm
-      val bScale = 1f - 0.2f * warm
-      for (i in 0 until n) { r[i] = clamp01(r[i] * rScale); b[i] = clamp01(b[i] * bScale) }
-    }
-
-    // 5. Saturation — CIColorControls: saturation = 1 + value (BT.601 luma).
-    if (p.saturation != 0.0) {
-      val sat = (1.0 + p.saturation).toFloat()
-      for (i in 0 until n) {
-        val l = 0.299f * r[i] + 0.587f * g[i] + 0.114f * b[i]
-        r[i] = clamp01(l + (r[i] - l) * sat)
-        g[i] = clamp01(l + (g[i] - l) * sat)
-        b[i] = clamp01(l + (b[i] - l) * sat)
-      }
-    }
-
-    // 6. Vibrance — selective saturation (CIVibrance approximation).
-    if (p.vibrance != 0.0) {
-      val amount = p.vibrance.toFloat()
-      for (i in 0 until n) {
-        val mx = maxOf(r[i], g[i], b[i])
-        val mn = minOf(r[i], g[i], b[i])
-        val satVal = if (mx > 0f) (mx - mn) / mx else 0f
-        val factor = 1f + amount * (1f - satVal)
-        val l = 0.299f * r[i] + 0.587f * g[i] + 0.114f * b[i]
-        r[i] = clamp01(l + (r[i] - l) * factor)
-        g[i] = clamp01(l + (g[i] - l) * factor)
-        b[i] = clamp01(l + (b[i] - l) * factor)
-      }
-    }
-
+    // Encode linear → sRGB for output (same as the full pipeline's final step).
     val out = IntArray(n)
     for (i in 0 until n) {
-      val rr = (r[i] * 255f).roundToInt().coerceIn(0, 255)
-      val gg = (g[i] * 255f).roundToInt().coerceIn(0, 255)
-      val bb = (b[i] * 255f).roundToInt().coerceIn(0, 255)
+      val rr = (linearToSrgb(clamp01(r[i])) * 255f).roundToInt().coerceIn(0, 255)
+      val gg = (linearToSrgb(clamp01(g[i])) * 255f).roundToInt().coerceIn(0, 255)
+      val bb = (linearToSrgb(clamp01(b[i])) * 255f).roundToInt().coerceIn(0, 255)
       out[i] = (0xFF shl 24) or (rr shl 16) or (gg shl 8) or bb
     }
     val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
