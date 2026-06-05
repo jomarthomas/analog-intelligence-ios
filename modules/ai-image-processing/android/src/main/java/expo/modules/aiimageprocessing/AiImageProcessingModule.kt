@@ -866,14 +866,47 @@ class AiImageProcessingModule : Module() {
    *      look is applied to the fully-corrected positive, matching iOS CIColorCube.
    *   3. Keep the sampling domain (linear vs sRGB) aligned with iOS so the two
    *      platforms agree on the look.
-   * Until then, callers may set [lut] freely with no visual effect.
+   * Procedural film looks (below) are implemented now; loading external .cube
+   * files remains the future enhancement described above.
+   */
+  private data class FilmLook(
+    val saturation: Float,
+    val shadowR: Float, val shadowG: Float, val shadowB: Float,
+    val highR: Float, val highG: Float, val highB: Float,
+  )
+
+  /** Look table. MUST stay in sync with iOS `filmLook(for:)` for parity. */
+  private fun filmLook(id: String): FilmLook? = when (id) {
+    "portra", "portra400" -> FilmLook(0.94f, 0.010f, 0.004f, -0.010f, 0.022f, 0.006f, -0.020f)
+    "frontier" -> FilmLook(1.08f, -0.012f, 0.000f, 0.028f, 0.020f, 0.006f, -0.018f)
+    "noritsu" -> FilmLook(1.04f, 0.000f, 0.000f, 0.010f, 0.012f, 0.004f, -0.010f)
+    "gold", "gold200" -> FilmLook(1.05f, 0.018f, 0.004f, -0.018f, 0.030f, 0.014f, -0.030f)
+    "ektar", "ektar100" -> FilmLook(1.16f, -0.008f, 0.000f, 0.012f, 0.010f, 0.000f, -0.012f)
+    else -> null
+  }
+
+  /**
+   * Apply the film "look" colour grade (saturation + luma-weighted split-tone)
+   * directly per-pixel in linear [0,1] — the SAME transform iOS bakes into its
+   * 17³ CIColorCube, applied exactly rather than interpolated, so the two
+   * platforms agree to within the cube's (imperceptible) interpolation error.
    */
   private fun applyLut(r: FloatArray, g: FloatArray, b: FloatArray, lut: String) {
-    val id = lut.trim()
+    val id = lut.trim().lowercase()
     if (id.isEmpty()) return
-    // No bundled LUTs are registered yet and no .cube parser exists, so every
-    // value is "unknown" and this is a NO-OP. (Real sampling is TODO(lut) above.)
-    return
+    val look = filmLook(id) ?: return
+    val n = r.size
+    for (i in 0 until n) {
+      val lum = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i]
+      val sw = (1f - lum) * (1f - lum)
+      val hw = lum * lum
+      val nr = lum + (r[i] - lum) * look.saturation + look.shadowR * sw + look.highR * hw
+      val ng = lum + (g[i] - lum) * look.saturation + look.shadowG * sw + look.highG * hw
+      val nb = lum + (b[i] - lum) * look.saturation + look.shadowB * sw + look.highB * hw
+      r[i] = nr.coerceIn(0f, 1f)
+      g[i] = ng.coerceIn(0f, 1f)
+      b[i] = nb.coerceIn(0f, 1f)
+    }
   }
 
   // MARK: - Film-base neutral white-balance suggestion

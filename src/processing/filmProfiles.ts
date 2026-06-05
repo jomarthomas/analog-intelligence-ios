@@ -39,8 +39,10 @@ export interface FilmProfile {
   group: FilmProfileGroup;
   /** Short one-line description shown under the name. */
   hint: string;
-  /** Slider offsets that define the look. */
+  /** Slider offsets that define the look (TONE; colour comes from the LUT). */
   params: ProfileParams;
+  /** Optional native film-colour LUT id (see modules/ai-image-processing). */
+  lut?: string;
 }
 
 /** The identity profile — no look applied. */
@@ -58,12 +60,13 @@ export const FILM_PROFILES: readonly FilmProfile[] = [
   { id: 'punchy', name: 'Punchy', group: 'look', hint: 'Bold contrast & colour', params: { contrast: 0.25, saturation: 0.2, vibrance: 0.15 } },
   { id: 'muted', name: 'Muted', group: 'look', hint: 'Soft, low saturation', params: { saturation: -0.25, contrast: -0.1 } },
   { id: 'vintage', name: 'Vintage', group: 'look', hint: 'Faded, lifted blacks', params: { warmth: 0.15, contrast: -0.15, saturation: -0.15, highlights: -0.1, shadows: 0.2 } },
-  // ── Lab-scanner & film-stock emulations ──
-  { id: 'frontier', name: 'Frontier', group: 'film', hint: 'Fuji lab — warm golds, teal shadows', params: { warmth: 0.18, contrast: 0.12, saturation: 0.1, highlights: -0.08, shadows: 0.12, vibrance: 0.1 } },
-  { id: 'noritsu', name: 'Noritsu', group: 'film', hint: 'Fuji lab — neutral, crisp', params: { warmth: -0.05, contrast: 0.1, saturation: 0.08, highlights: -0.05 } },
-  { id: 'portra', name: 'Portra', group: 'film', hint: 'Soft warm pastel skin tones', params: { warmth: 0.12, contrast: -0.05, saturation: -0.05, highlights: -0.05, shadows: 0.08, vibrance: 0.05 } },
-  { id: 'gold', name: 'Gold', group: 'film', hint: 'Warm, saturated, nostalgic', params: { warmth: 0.22, contrast: 0.1, saturation: 0.18, vibrance: 0.1 } },
-  { id: 'ektar', name: 'Ektar', group: 'film', hint: 'Vivid, high-contrast colour', params: { contrast: 0.2, saturation: 0.25, vibrance: 0.2 } },
+  // ── Lab-scanner & film-stock emulations (COLOUR via native 3D-LUT; the
+  //    slider offsets here carry tone only, so colour isn't double-applied). ──
+  { id: 'frontier', name: 'Frontier', group: 'film', hint: 'Fuji lab — warm golds, teal shadows', lut: 'frontier', params: { warmth: 0.1, contrast: 0.12, highlights: -0.08, shadows: 0.12 } },
+  { id: 'noritsu', name: 'Noritsu', group: 'film', hint: 'Fuji lab — neutral, crisp', lut: 'noritsu', params: { warmth: -0.03, contrast: 0.1, highlights: -0.05 } },
+  { id: 'portra', name: 'Portra', group: 'film', hint: 'Soft warm pastel skin tones', lut: 'portra', params: { warmth: 0.08, contrast: -0.05, highlights: -0.05, shadows: 0.08 } },
+  { id: 'gold', name: 'Gold', group: 'film', hint: 'Warm, saturated, nostalgic', lut: 'gold', params: { warmth: 0.14, contrast: 0.1 } },
+  { id: 'ektar', name: 'Ektar', group: 'film', hint: 'Vivid, high-contrast colour', lut: 'ektar', params: { contrast: 0.2 } },
 ];
 
 const PROFILE_BY_ID = new Map(FILM_PROFILES.map((p) => [p.id, p]));
@@ -84,7 +87,10 @@ export function applyFilmProfile(
   profileId: string | undefined | null,
 ): FullProcessParams {
   const profile = getFilmProfile(profileId);
-  if (profile == null || profile.id === NEUTRAL_PROFILE_ID) return base;
+  if (profile == null || profile.id === NEUTRAL_PROFILE_ID) {
+    // Returning to Natural/unknown clears any previously-applied film LUT.
+    return { ...base, lut: undefined };
+  }
 
   const add = (key: keyof ProfileParams, baseVal: number | undefined): number =>
     clampParam(key, (baseVal ?? 0) + (profile.params[key] ?? 0));
@@ -98,11 +104,14 @@ export function applyFilmProfile(
     highlights: add('highlights', base.highlights),
     shadows: add('shadows', base.shadows),
     vibrance: add('vibrance', base.vibrance),
+    // Native film-colour LUT (undefined for the slider-only "look" group).
+    lut: profile.lut,
   };
 }
 
-// TODO(film-emulation): replace the slider approximations above with real 3D
-// LUTs (.cube) baked from reference Frontier/Noritsu/Portra scans. Add an
-// optional `lut?: string` to FilmProfile and a native `applyLut` step; the
-// engine would sample the LUT after the tone curve. Slider offsets remain the
-// fallback when a LUT isn't bundled.
+// Film-stock COLOUR now comes from a native procedural 3D-LUT (per-stock
+// saturation + luma-weighted split-tone) keyed by `FilmProfile.lut` and applied
+// in the engine's `applyLut` step after the tone curve (iOS CIColorCube /
+// Android per-pixel; see modules/ai-image-processing). The slider offsets above
+// carry TONE only. A future enhancement is loading real .cube LUTs baked from
+// reference Frontier/Noritsu/Portra scans.
