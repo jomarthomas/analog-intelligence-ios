@@ -121,6 +121,21 @@ export interface ProcessParams {
   shadows?: number;
   /** Vibrance −1.0…+1.0 (legacy `UserAdjustments.applyVibrance`). */
   vibrance?: number;
+
+  /**
+   * Optional 3D-LUT (colour look-up table) selector for a film-emulation
+   * "look" applied as the FINAL colour stage of the pipeline (after the tone
+   * curve and user adjustments, before encode). Either a **bundled-LUT id**
+   * (e.g. `'portra400'`) or a **file URI** to a `.cube` LUT.
+   *
+   * **Scaffold only — currently a NO-OP.** The native `applyLut` stage is an
+   * identity pass-through: an unset, empty, or unrecognised value leaves the
+   * image byte-for-byte unchanged, so existing behaviour is preserved. This
+   * field exists so the JS film-profiles can start passing a `lut` ahead of a
+   * real 3D-LUT sampler landing natively (see `TODO(lut)` in the Swift/Kotlin
+   * sources). Omitted ⇒ no LUT (unchanged default).
+   */
+  lut?: string;
 }
 
 /**
@@ -269,3 +284,43 @@ export interface FrameDetectionResult {
  * Pro-gating and the format-picker UI without importing from an unrelated file.
  */
 export type ExportFormat = 'jpeg' | 'heic' | 'dng';
+
+/**
+ * Result of {@link estimateFilmBaseNeutral} — a SUGGESTED white-balance
+ * correction derived from the unexposed film **base / rebate**.
+ *
+ * Both values are expressed in the app's existing `UserAdjustments` slider
+ * units so they can be fed straight into {@link ProcessParams.warmth} (and a
+ * future `tint` slider) or used to seed `applyUserAdjustments`. They describe
+ * the correction to APPLY to neutralise the base, not the colour of the base
+ * itself.
+ *
+ * Powers the one-tap "neutralise from film base" button. Deterministic: the
+ * same input image always yields the same suggestion.
+ *
+ * @see The "Film-base neutral white-balance suggestion" section of `PARITY.md`
+ *   for the exact base-RGB → warmth/tint mapping.
+ */
+export interface FilmBaseNeutral {
+  /**
+   * Suggested **warmth** correction in −1.0…+1.0, in the same units as
+   * {@link ProcessParams.warmth} (which maps to a 4500K…8500K colour
+   * temperature via `CITemperatureAndTint`). A colour-negative film base is
+   * warm/orange, so the suggestion is typically **negative** (cooler) to
+   * counter it. 0 when no base is found.
+   */
+  warmth: number;
+  /**
+   * Suggested **tint** correction in −1.0…+1.0 on the green↔magenta axis
+   * (negative = toward green, positive = toward magenta), matching the sign
+   * convention of `CITemperatureAndTint`'s tint component. 0 when no base is
+   * found.
+   */
+  tint: number;
+  /**
+   * `true` when a clear film base/rebate was detected and the suggestion is
+   * meaningful; `false` when none was found (in which case `warmth` and
+   * `tint` are both 0 and the UI should leave the sliders untouched).
+   */
+  found: boolean;
+}

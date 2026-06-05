@@ -54,3 +54,11 @@ export {
   formatRollDate,
 } from './galleryGrouping';
 export type { RollSection } from './galleryGrouping';
+
+export { applyParamsToRoll } from './applyLookToRoll';
+export type {
+  ApplyLookOptions,
+  ApplyLookProgress,
+  ApplyLookResult,
+  ApplyLookFailure,
+} from './applyLookToRoll';
