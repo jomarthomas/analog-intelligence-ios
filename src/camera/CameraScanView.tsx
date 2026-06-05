@@ -151,8 +151,11 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
 
   const [sessionReady, setSessionReady] = useState(false);
 
-  // Live lighting guidance — runs only while the camera is active + idle.
-  const guidance = useCaptureGuidance(isActive && sessionReady && !isCapturing);
+  // Live lighting guidance — runs only while the camera is active + idle, and
+  // yields to focus peaking so the session never has two frame outputs at once.
+  const guidance = useCaptureGuidance(
+    isActive && sessionReady && !isCapturing && !focusPeakingEnabled,
+  );
 
   // Pull capabilities + initial 3A snapshot once the controller is bound.
   const refreshFromController = useCallback(() => {
@@ -271,7 +274,11 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           style={StyleSheet.absoluteFill}
           device={device}
           isActive={isActive}
-          outputs={[photoOutput, guidance.output, ...frame.outputs]}
+          outputs={[
+            photoOutput,
+            ...(focusPeakingEnabled ? [] : [guidance.output]),
+            ...frame.outputs,
+          ]}
           torchMode={torchEnabled ? 'on' : 'off'}
           resizeMode="cover"
           onStarted={handleStarted}
