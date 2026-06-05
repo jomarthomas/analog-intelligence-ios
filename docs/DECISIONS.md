@@ -36,9 +36,14 @@ integrating orchestrator.
 
 ## Monetization secrets
 
-- **(Q4)** RevenueCat entitlement/offering IDs + AdMob app IDs are injected via
-  `app.json` → `expo.extra` (read with `expo-constants`) plus a local gitignored
-  `.env` for dev. **No secrets committed.** Use placeholder constants for now.
+- **(Q4)** RevenueCat keys + AdMob app/ad-unit IDs are injected by **`app.config.ts`**
+  from the environment — a gitignored `.env` locally, or **EAS secrets** for cloud
+  builds — and surfaced at runtime via `expo-constants` (`src/monetization/config.ts`),
+  with Google **test** IDs / RevenueCat placeholders as fallbacks so the app runs with
+  no secrets. **No real secrets are committed** (this is a public repo). The AdMob
+  *app ID* is also baked natively (`GADApplicationIdentifier`) by the
+  `react-native-google-mobile-ads` plugin from the same env value. See
+  `docs/MONETIZATION_SETUP.md`.
 
 ## Theme
 

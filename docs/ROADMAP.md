@@ -18,7 +18,7 @@ The milestones map directly to the ones defined in `AGENTS.md` and elaborated in
 |---|---|
 | Tab navigation | Four tabs: Scan / Gallery / Insights / Settings via expo-router `(tabs)/` group |
 | Adjust screen | `adjust/[id].tsx` route, receives `ScannedImage` id |
-| Design tokens | `src/theme/` — orange accent (#FF9933), dark camera UI, typography scale |
+| Design tokens | `src/theme/` — minimalist black & white (no colour accent), dark camera UI, typography scale |
 | Root layout | `_layout.tsx` — ThemeProvider, RevenueCat init, AdMob init |
 
 ### M1.2 — Native Module Skeleton (Native agent)

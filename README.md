@@ -71,10 +71,12 @@ npm run typecheck
 
 ## Configuration
 
-RevenueCat and AdMob IDs are read from `app.json` → `expo.extra` via `expo-constants`.
-The committed values are **placeholders / Google test IDs** — replace them with real
-keys (ideally via a git-ignored `.env` feeding the Expo config) before a store build.
-See [`docs/DECISIONS.md`](./docs/DECISIONS.md).
+RevenueCat and AdMob IDs resolve through **`app.config.ts`**, which injects them from
+the environment (a git-ignored `.env` locally, or EAS secrets for cloud builds) and
+falls back to Google **test** IDs / RevenueCat placeholders when unset — so the app
+runs with no secrets, and real keys never land in this public repo. See
+[`docs/MONETIZATION_SETUP.md`](./docs/MONETIZATION_SETUP.md) and
+[`docs/APP_STORE_READINESS.md`](./docs/APP_STORE_READINESS.md).
 
 ## Project structure
 
@@ -89,7 +91,7 @@ src/
   ai/             Phase-2 on-device AI scaffold
   features/       feature UI (scan / adjust / gallery / settings)
   state/          zustand stores
-  theme/          design system (dark film/darkroom aesthetic)
+  theme/          design system (minimalist black & white)
 modules/
   ai-image-processing/   negative→positive engine (Swift + Kotlin)
   dock-ble/              Phase-3 BLE dock interfaces + simulation
