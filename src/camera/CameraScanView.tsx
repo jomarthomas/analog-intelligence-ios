@@ -37,7 +37,6 @@ import {
   Camera,
   useCameraDevice,
   usePhotoOutput,
-  usePreviewOutput,
   type CameraRef,
   type TargetPhotoContainerFormat,
 } from 'react-native-vision-camera';
@@ -130,11 +129,12 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
     captureFormat === 'dng' && !capabilities.supportsRawCapture ? 'heic' : captureFormat;
   if (effectiveFormat === 'heic' && heicUnsupported) effectiveFormat = 'jpeg';
 
-  // Outputs: live preview + still photo. The photo output's container format is
-  // driven by the selected capture format — VisionCamera v5 sets the container
-  // at the OUTPUT level (not per-capture), and `usePhotoOutput` re-creates the
-  // output (re-configuring the session) when `containerFormat` changes.
-  const previewOutput = usePreviewOutput();
+  // Outputs: still photo only. The <Camera> creates and prepends its OWN preview
+  // output internally (see Camera.tsx: `outputs: [previewOutput, ...outputs]`),
+  // so we must NOT pass a second one here — two preview outputs fail session
+  // configuration (black preview, `onStarted` never fires, endless spinner).
+  // The photo output's container format is set at the OUTPUT level in v5;
+  // `usePhotoOutput` re-creates the output (re-configuring) when it changes.
   const photoOutput = usePhotoOutput({
     qualityPrioritization: 'quality',
     containerFormat: toContainerFormat(effectiveFormat),
@@ -245,7 +245,7 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           style={StyleSheet.absoluteFill}
           device={device}
           isActive={isActive}
-          outputs={[previewOutput, photoOutput, ...frame.outputs]}
+          outputs={[photoOutput, ...frame.outputs]}
           torchMode={torchEnabled ? 'on' : 'off'}
           resizeMode="cover"
           onStarted={handleStarted}
