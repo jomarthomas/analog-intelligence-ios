@@ -106,6 +106,14 @@ export interface FullProcessParams {
   /** AI dust/scratch removal flag (Pro). Currently no-op in native. */
   aiDustRemoval?: boolean;
 
+  /**
+   * Optional maximum output dimension (longer edge, px). When set, the native
+   * engine downscales the image before the heavy per-pixel passes — used by the
+   * live-preview fast path for snappier slider response and lower memory.
+   * Omitted / <= 0 means full resolution (used for the final commit).
+   */
+  maxDimension?: number;
+
   // ----- TS-layer-only fields (NOT forwarded to native pipeline) -----
 
   /**
@@ -143,6 +151,7 @@ export function toNativeParams(p: FullProcessParams): ProcessParams {
     vibrance: p.vibrance,
     aiColor: p.aiColor,
     aiDustRemoval: p.aiDustRemoval,
+    maxDimension: p.maxDimension,
   };
 }
 

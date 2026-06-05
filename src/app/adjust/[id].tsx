@@ -50,7 +50,13 @@ import type { FullProcessParams, FilmProfile } from '@/processing';
 import { ProGate } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
 
-import { AdjustPreview, AdjustSlider, AIToggleRow, FilmProfilePicker } from '@/features/adjust';
+import {
+  AdjustPreview,
+  AdjustSlider,
+  AIToggleRow,
+  BeforeAfterCompare,
+  FilmProfilePicker,
+} from '@/features/adjust';
 import { Histogram } from '@/insights';
 import { analyzeHistogram } from '../../../modules/ai-image-processing';
 import type { Histogram as HistogramData } from '../../../modules/ai-image-processing';
@@ -237,6 +243,7 @@ function AdjustScreenBody({
   const pipeline = usePipeline({ imageId, originalUri, initialParams });
   const [isCommitting, setIsCommitting] = useState(false);
   const [profileId, setProfileId] = useState<string>(NEUTRAL_PROFILE_ID);
+  const [compareMode, setCompareMode] = useState(false);
 
   // Selecting a film/lab look resets the 7 user-adjustment sliders to that
   // profile's values (applied over neutral), which the live preview re-renders.
@@ -321,12 +328,28 @@ function AdjustScreenBody({
         style={styles.flex}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}>
-        {/* Live preview (positive) + watermark for free tier */}
-        <AdjustPreview
-          previewUri={pipeline.previewUri}
-          originalUri={originalUri}
-          isProcessing={pipeline.isProcessing}
-        />
+        {/* Before/after toggle */}
+        <View style={styles.previewHeaderRow}>
+          <Button variant="ghost" size="sm" onPress={() => setCompareMode((m) => !m)}>
+            {compareMode ? 'Edit' : 'Before / After'}
+          </Button>
+        </View>
+
+        {/* Live preview (positive) + watermark — or the drag-to-reveal compare */}
+        {compareMode ? (
+          <View style={styles.compareWrap}>
+            <BeforeAfterCompare
+              beforeUri={originalUri}
+              afterUri={pipeline.previewUri ?? originalUri}
+            />
+          </View>
+        ) : (
+          <AdjustPreview
+            previewUri={pipeline.previewUri}
+            originalUri={originalUri}
+            isProcessing={pipeline.isProcessing}
+          />
+        )}
 
         {/* Live histogram — shown below the preview when data is available.
             Uses the Insights <Histogram> component (compact height 80). */}
@@ -472,6 +495,16 @@ const styles = StyleSheet.create({
     // the chip row reaches the screen edges and scrolls naturally.
     marginHorizontal: -Spacing.md,
     marginBottom: Spacing.sm,
+  },
+  previewHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginBottom: Spacing.xs,
+  },
+  compareWrap: {
+    height: 320,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
   histogramContainer: {
     marginTop: Spacing.sm,

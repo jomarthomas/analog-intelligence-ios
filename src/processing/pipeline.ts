@@ -222,6 +222,13 @@ function toUserAdjust(params: FullProcessParams): UserAdjustParams {
   };
 }
 
+/**
+ * Longer-edge resolution (px) for the live Adjust-screen preview base. Large
+ * enough to look sharp on a phone screen, small enough that the per-pixel
+ * Android passes are fast and never OOM. The committed render is full-res.
+ */
+const PREVIEW_MAX_DIMENSION = 1280;
+
 /** Single-entry cache of the last structural base positive (for the fast path). */
 let baseCache: { key: string; baseUri: string } | null = null;
 
@@ -256,6 +263,10 @@ export async function previewParams(
       highlights: 0,
       shadows: 0,
       vibrance: 0,
+      // Render the preview base at a reduced resolution so the full pipeline +
+      // every subsequent slider re-render are snappy and memory-light. The
+      // committed render (runPipeline) omits this and stays full-resolution.
+      maxDimension: PREVIEW_MAX_DIMENSION,
     };
     const base = await processNegative(originalUri, toNativeParams(neutral));
     baseCache = { key, baseUri: base.uri };
