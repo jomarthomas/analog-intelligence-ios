@@ -51,3 +51,6 @@ modules/*/android/build/
 # Local secrets (real AdMob/RevenueCat keys) — Expo auto-loads .env; never commit
 .env
 .env.local
+
+# Competitor reference screenshots (local study only)
+examples-apps-imgs/

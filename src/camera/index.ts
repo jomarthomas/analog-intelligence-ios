@@ -6,7 +6,26 @@
  */
 
 export { CameraScanView } from './CameraScanView';
-export type { CameraScanViewProps } from './CameraScanView';
+export type { CameraScanViewProps, CaptureMeta } from './CameraScanView';
+
+export { FilmGuideOverlay } from './FilmGuideOverlay';
+export type { FilmGuideOverlayProps } from './FilmGuideOverlay';
+
+export { autoCropToFilmFrame } from './autoCrop';
+export type { AutoCropResult } from './autoCrop';
+
+export {
+  useCaptureGuidance,
+  captureHint,
+  frameGuidance,
+} from './useCaptureGuidance';
+export type {
+  CaptureHint,
+  ExposureStats,
+  FrameCoverage,
+  FrameGuidance,
+  FrameGuideState,
+} from './useCaptureGuidance';
 
 export { useCameraPermissions } from './useCameraPermissions';
 export type {

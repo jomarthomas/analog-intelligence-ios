@@ -15,7 +15,6 @@ import expo.modules.kotlin.records.Record
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
-import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -463,6 +462,28 @@ class AiImageProcessingModule : Module() {
   private val BASE_WARMTH_GAIN = 1.5f
   private val BASE_TINT_GAIN = 2.0f
 
+  // --- White-out guard constants (must match the iOS statics) -------------
+  // Minimum trustworthy per-channel film-base density. Floors the orange-mask
+  // densities so the 1/density compensation gains stay bounded (iOS
+  // kMinBaseDensity).
+  private val MIN_BASE_DENSITY = 0.05f
+  // Upper bound on a per-channel orange-mask compensation gain, so mask removal
+  // can never multiply a channel out to pure white (iOS kMaxMaskGain).
+  private val MAX_MASK_GAIN = 3.0f
+  // Upper luminance bound (0–255) for film-base candidates — near-clipped
+  // pixels are a bright surround/light source, not the dense orange rebate, so
+  // they are excluded to resist contamination (iOS kBaseMaxLuma).
+  private val BASE_MAX_LUMA = 250f
+  // Minimum luminance range for the auto-tone levels remap; floors the slope so
+  // a flat capture can't be amplified to white (iOS kMinToneRange).
+  private val MIN_TONE_RANGE = 0.10f
+  // Midtone-lift gamma power for the auto-tone curve (< 1 brightens midtones for
+  // the clean lab-scan look; pow(v,<1) keeps [0,1] within [0,1]) (iOS kToneGamma).
+  private val TONE_GAMMA = 0.8f
+
+  /** Clamp a derived density into [MIN_BASE_DENSITY, 1] (iOS clampDensity). */
+  private fun clampDensity(v: Float): Float = min(1.0f, max(MIN_BASE_DENSITY, v))
+
   // Orange-mask estimation now **prefers film-base (rebate) sampling** — the
   // Android twin of the iOS `estimateOrangeMask(image:preInvert:)`.
   //
@@ -513,7 +534,16 @@ class AiImageProcessingModule : Module() {
     val targetSamples = max(1, (n * 0.1).toInt())
     val stride = max(1, n / targetSamples)
 
-    data class BasePx(val r: Float, val g: Float, val b: Float, val lum: Float)
+    // Collect bright, orange-dominant candidates (the film base).
+    //
+    // CONTAMINATION GUARD (iOS parity): exclude near-clipped pixels
+    // (luma >= BASE_MAX_LUMA). The unexposed C-41 base photographs as a
+    // bright-but-not-blown orange; a fully-clipped region is the light source /
+    // a bright background bleeding around the frame, NOT the dense film base.
+    // Candidates are ranked by ORANGE STRENGTH (R−B) rather than raw luminance,
+    // so the most saturated-orange rebate pixels win over a merely bright,
+    // weakly-warm background that scraped past the ordering test.
+    data class BasePx(val r: Float, val g: Float, val b: Float, val orange: Float)
     val base = ArrayList<BasePx>()
     var i = 0
     while (i < n) {
@@ -521,17 +551,20 @@ class AiImageProcessingModule : Module() {
       val gs = linearToSrgb(clamp01(preG[i])) * 255f
       val bs = linearToSrgb(clamp01(preB[i])) * 255f
       val lum = 0.299f * rs + 0.587f * gs + 0.114f * bs
-      // Orange ordering with margin, and bright enough to be the base.
+      // Orange ordering with margin, bright enough to be the base, but not a
+      // blown highlight.
       val orange = (rs > gs + 10f) && (gs > bs + 5f)
-      if (lum > 120f && orange) base.add(BasePx(rs / 255f, gs / 255f, bs / 255f, lum))
+      if (lum > 120f && lum < BASE_MAX_LUMA && orange) {
+        base.add(BasePx(rs / 255f, gs / 255f, bs / 255f, rs - bs))
+      }
       i += stride
     }
 
     // Need a convincing amount of base to trust this estimate.
     if (base.size < 100) return null
 
-    // Average the 100 BRIGHTEST orange-base pixels (max-density base).
-    base.sortByDescending { it.lum }
+    // Average the 100 MOST-ORANGE base pixels (max-density base).
+    base.sortByDescending { it.orange }
     val samples = base.subList(0, 100)
     val avgR = samples.sumOf { it.r.toDouble() }.toFloat() / 100f
     val avgG = samples.sumOf { it.g.toDouble() }.toFloat() / 100f
@@ -548,15 +581,19 @@ class AiImageProcessingModule : Module() {
    * `densitiesFromBase`.
    */
   private fun densitiesFromBase(baseR: Float, baseG: Float, baseB: Float): OrangeMask {
-    val r = clamp01(1f - baseR)
-    val g = clamp01(1f - baseG)
-    val b = clamp01(1f - baseB)
-    val safeR = max(r, 0.0001f)
+    // ROBUSTNESS (white-out guard): floor every post-invert base channel before
+    // the red-normalized ratios so a near-white/contaminated base sample cannot
+    // drive a density → 0 and the downstream 1/density gain → ∞ (which would
+    // blow the frame to pure white). Densities are then clamped into
+    // [MIN_BASE_DENSITY, 1]. Mirrors iOS densitiesFromBase.
+    val r = clampDensity(1f - baseR)
+    val g = clampDensity(1f - baseG)
+    val b = clampDensity(1f - baseB)
     val range = maxOf(r, g, b) - minOf(r, g, b)
     return OrangeMask(
       redDensity = 1.0f,
-      greenDensity = g / safeR,
-      blueDensity = b / safeR,
+      greenDensity = clampDensity(g / r),
+      blueDensity = clampDensity(b / r),
       strength = if (range > 0.1f) min(1.0f, range * 2.0f) else 0.3f
     )
   }
@@ -595,12 +632,16 @@ class AiImageProcessingModule : Module() {
     val avgG = samples.sumOf { it.g.toDouble() }.toFloat() / 100f
     val avgB = samples.sumOf { it.b.toDouble() }.toFloat() / 100f
 
-    val safeR = max(avgR, 0.0001f)
-    val range = maxOf(avgR, avgG, avgB) - minOf(avgR, avgG, avgB)
+    // Floor the sampled channels (white-out guard) before the red-normalized
+    // ratios so a degenerate dark sample cannot drive a density toward zero.
+    val r = clampDensity(avgR)
+    val g = clampDensity(avgG)
+    val b = clampDensity(avgB)
+    val range = maxOf(r, g, b) - minOf(r, g, b)
     return OrangeMask(
       redDensity = 1.0f,
-      greenDensity = avgG / safeR,
-      blueDensity = avgB / safeR,
+      greenDensity = clampDensity(g / r),
+      blueDensity = clampDensity(b / r),
       strength = if (range > 0.1f) min(1.0f, range * 2.0f) else 0.3f
     )
   }
@@ -610,9 +651,12 @@ class AiImageProcessingModule : Module() {
     val redComp = 1.0f / max(mask.redDensity, 0.1f)
     val greenComp = 1.0f / max(mask.greenDensity, 0.1f)
     val blueComp = 1.0f / max(mask.blueDensity, 0.1f)
-    val norm = blueComp
-    val redGain = redComp / norm
-    val greenGain = greenComp / norm
+    // Normalize to the most-compensated (blue) channel, then CAP the per-channel
+    // gains at MAX_MASK_GAIN so mask removal can never multiply a channel hard
+    // enough to clip the frame to pure white (white-out guard, iOS parity).
+    val norm = max(blueComp, 0.0001f)
+    val redGain = min(redComp / norm, MAX_MASK_GAIN)
+    val greenGain = min(greenComp / norm, MAX_MASK_GAIN)
     val blueGain = 1.0f
     val bias = -0.05f * mask.strength // applied to R and G only (matches legacy)
     for (i in r.indices) {
@@ -643,10 +687,37 @@ class AiImageProcessingModule : Module() {
 
   // MARK: Step 6 — tone correction (ColorCorrector.calculateToneCurve/applyToneCurve)
 
+  /**
+   * Robust automatic tone correction (Android twin of the iOS
+   * `applyToneCorrection`).
+   *
+   * WHITE-OUT FIX — what changed vs the legacy port and WHY:
+   *   The legacy curve computed `brightness = log2(1/range)` and applied it as
+   *   an ADDITIVE display-space offset. For any capture that wasn't a
+   *   perfectly-filled, evenly-lit negative, `range` is small, so that offset is
+   *   large and is added to every pixel — pushing the whole frame past 1.0 and
+   *   clipping it to solid white. That is the reported failure.
+   *
+   *   It is replaced by a bounded LEVELS REMAP: a slope+bias that maps the
+   *   robust black/white points to [0,1] (`out = (in - black) / range`).
+   *   Monotonic and self-normalising — the white point maps to exactly 1.0, so
+   *   it can NEVER drive values above white. `range` is floored
+   *   (`MIN_TONE_RANGE`) so the slope can't explode on a flat capture, and the
+   *   points use robust 2%/98% percentiles (ignoring the brightest/darkest
+   *   outliers). The gentle contrast (1.1) and midtone gamma are kept, applied
+   *   AFTER the safe remap. Worst case is a flat-but-usable image, never blank.
+   *
+   * Tone-domain parity note: as with the existing negative tone curve and
+   * `normalizeSlide`, Android applies the remap + contrast + gamma in
+   * sRGB-encoded space (round-tripping per pixel), while iOS applies the remap
+   * (CIColorMatrix) and contrast/gamma in its linear working space. Both derive
+   * the black/white points from an sRGB-encoded luminance histogram. This is the
+   * same accepted linear-vs-sRGB split documented in PARITY.md — iOS authoritative.
+   */
   private fun applyToneCorrection(r: FloatArray, g: FloatArray, b: FloatArray) {
     val n = r.size
-    // Build a 256-bin luminance histogram (BT.601, matching the legacy CDF on
-    // CIAreaHistogram output which is sampled in sRGB-encoded bins).
+    // Build a 256-bin luminance histogram (BT.601, sampled in sRGB-encoded bins
+    // to match the CIAreaHistogram domain on iOS).
     val hist = DoubleArray(256)
     for (i in 0 until n) {
       val rs = linearToSrgb(clamp01(r[i]))
@@ -655,45 +726,75 @@ class AiImageProcessingModule : Module() {
       val lum = 0.299f * rs + 0.587f * gs + 0.114f * bs
       hist[min((lum * 255f).toInt(), 255)] += 1.0
     }
-    var total = 0.0
-    for (v in hist) total += v
-    val safeTotal = max(total, 1.0)
 
-    var blackPoint = 0f
-    var whitePoint = 1f
-    var cumulative = 0.0
-    for (bin in 0 until 256) {
-      cumulative += hist[bin]
-      val cdf = cumulative / safeTotal
-      if (cdf >= 0.01 && blackPoint == 0f) blackPoint = bin / 255f
-      if (cdf >= 0.99) { whitePoint = bin / 255f; break }
-    }
+    val (blackPoint, whitePoint) = robustBlackWhitePoints(hist)
 
-    val midPoint = 0.5f
     val contrast = 1.1f
-    val inputRange = whitePoint - blackPoint
-    val brightness = (ln((1.0 / max(inputRange, 0.1f)).toDouble()) / ln(2.0)).toFloat() // log2
-
-    // Apply in sRGB-encoded space to match CIColorControls/CIGammaAdjust, which
-    // operate on the (display-referred) values in the legacy graph.
-    val gammaPower = 1.0f / midPoint
+    // Floor the range so a flat/low-contrast capture yields a bounded slope
+    // (<= 1/MIN_TONE_RANGE) instead of an exploding amplification → white.
+    val inputRange = max(whitePoint - blackPoint, MIN_TONE_RANGE)
+    val slope = 1.0f / inputRange
+    val bias = -blackPoint / inputRange
+    // Gentle midtone-LIFT gamma (Task #3, "tuned to not crush"): the legacy
+    // gamma was 1/midPoint = 2.0, a darkening curve that only looked right
+    // because the old additive brightness over-brightened first. With that
+    // removed (white-out fix), pow-2.0 would crush midtones; a brightening
+    // power < 1 lifts them for the clean lab-scan look. White-out-safe.
+    val gammaPower = TONE_GAMMA
     for (i in 0 until n) {
-      r[i] = toneMap(r[i], brightness, contrast, gammaPower)
-      g[i] = toneMap(g[i], brightness, contrast, gammaPower)
-      b[i] = toneMap(b[i], brightness, contrast, gammaPower)
+      r[i] = toneMap(r[i], slope, bias, contrast, gammaPower)
+      g[i] = toneMap(g[i], slope, bias, contrast, gammaPower)
+      b[i] = toneMap(b[i], slope, bias, contrast, gammaPower)
     }
   }
 
   /**
-   * Reproduces the legacy three-stage tone op on one channel:
-   *   1. CIColorControls brightness: additive in display space.
-   *   2. CIColorControls contrast:   (v - 0.5) * contrast + 0.5.
-   *   3. CIGammaAdjust:              pow(v, 1/midPoint).
-   * Conversions in/out of sRGB keep the rest of the linear pipeline consistent.
+   * Robust black/white points from a 256-bin BT.601 luminance histogram
+   * (sRGB-encoded). Returns the bin positions (normalized [0,1]) at the 2nd and
+   * 98th percentiles, so the brightest/darkest ~2% of pixels (hot/dead pixels,
+   * specular glints, a black surround) are treated as outliers and never define
+   * the mapping. A guaranteed minimum separation is enforced so a degenerate
+   * (single-bin) histogram still yields a sane range. Mirrors iOS
+   * `robustBlackWhitePoints`.
    */
-  private fun toneMap(linear: Float, brightness: Float, contrast: Float, gammaPower: Float): Float {
+  private fun robustBlackWhitePoints(hist: DoubleArray): Pair<Float, Float> {
+    var total = 0.0
+    for (v in hist) total += v
+    val safeTotal = max(total, 1.0)
+
+    var blackBin = 0
+    var whiteBin = 255
+    var foundBlack = false
+    var cumulative = 0.0
+    for (bin in 0 until 256) {
+      cumulative += hist[bin]
+      val cdf = cumulative / safeTotal
+      // 2% / 98% robust percentiles (ignore the darkest/brightest ~2% outliers).
+      if (!foundBlack && cdf >= 0.02) { blackBin = bin; foundBlack = true }
+      if (cdf >= 0.98) { whiteBin = bin; break }
+    }
+
+    // Ensure the white point is meaningfully above the black point even for a
+    // near-flat histogram (MIN_TONE_RANGE also floors the slope downstream).
+    if (whiteBin <= blackBin) {
+      whiteBin = min(255, blackBin + (MIN_TONE_RANGE * 255f).toInt())
+    }
+    return Pair(blackBin / 255f, whiteBin / 255f)
+  }
+
+  /**
+   * Robust tone op on one channel, in sRGB-encoded space (round-tripping the
+   * linear input/output to keep the pipeline consistent):
+   *   1. Bounded LEVELS REMAP: v = v * slope + bias  (replaces the legacy
+   *      additive brightness; maps [black, white] → [0,1], white → exactly 1.0).
+   *   2. Contrast about mid-grey: (v - 0.5) * contrast + 0.5.
+   *   3. Gamma: pow(v, gammaPower)  (gammaPower = TONE_GAMMA < 1, a midtone lift).
+   * Each stage is clamped to [0,1]. Mirrors the iOS CIColorMatrix → contrast →
+   * gamma chain.
+   */
+  private fun toneMap(linear: Float, slope: Float, bias: Float, contrast: Float, gammaPower: Float): Float {
     var v = linearToSrgb(clamp01(linear))
-    v += brightness                          // brightness (additive)
+    v = clamp01(v * slope + bias)            // bounded levels remap
     v = (v - 0.5f) * contrast + 0.5f         // contrast about mid-grey
     v = clamp01(v)
     v = v.pow(gammaPower)                     // gamma

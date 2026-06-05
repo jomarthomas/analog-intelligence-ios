@@ -9,11 +9,14 @@
  *   3. Free tier shows a "SPONSORED AD" banner at the bottom (BannerAd renders
  *      null for Pro automatically).
  *
- * Wired capabilities (task #13):
- *   - AUTO FRAME-DETECTION: after capture, detectFilmFrame(originalUri) runs
- *     non-blocking. If found, DetectedFrameOverlay is shown and the user can
- *     apply the cropRect into the Adjust flow. If not found, the normal
- *     FrameAlignmentOverlay fallback remains in CameraScanView.
+ * Wired capabilities:
+ *   - AUTO-CROP ON CAPTURE: after capture, autoCropToFilmFrame(originalUri,…)
+ *     detects the film boundary and SILENTLY crops the captured file down to the
+ *     negative BEFORE it is saved or processed — so the engine never sees the
+ *     bright room behind a held-up negative (which would blow the result to
+ *     white). Detection/crop failures fall back to the full frame gracefully and
+ *     the flow continues unchanged. The user is never asked to confirm a crop;
+ *     the dimmed alignment guide in CameraScanView already framed the shot.
  *   - DOCK UI: when a dock is connected, a DockStatusBar is shown and the
  *     "Start Roll Scan" / "Stop Roll Scan" controls appear. Jam / disconnect
  *     errors surface as Alerts. The normal handheld capture flow is intact
@@ -37,7 +40,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
-  LayoutChangeEvent,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -47,6 +49,8 @@ import { File } from 'expo-file-system';
 import { useIsFocused, useRouter } from 'expo-router';
 
 import { CameraScanView } from '@/camera';
+import type { CaptureMeta } from '@/camera';
+import { autoCropToFilmFrame } from '@/camera/autoCrop';
 import { BannerAd, getProStatusSync } from '@/monetization';
 import { saveImage } from '@/storage';
 import type { CaptureMetadata } from '@/storage';
@@ -56,9 +60,7 @@ import { useCaptureStore } from '@/state/captureStore';
 import { Screen } from '@/theme/screen';
 import { Palette, Spacing, FontSize, FontWeight, Radius } from '@/theme';
 
-import { DetectedFrameOverlay, DockStatusBar } from '@/features/scan';
-import { detectFilmFrame } from '../../../modules/ai-image-processing';
-import type { FrameDetectionResult } from '../../../modules/ai-image-processing';
+import { DockStatusBar } from '@/features/scan';
 
 /** Map a captured file's extension to the storage CaptureMetadata format. */
 function formatFromUri(uri: string): CaptureMetadata['format'] {
@@ -78,18 +80,6 @@ function formatFromUri(uri: string): CaptureMetadata['format'] {
 }
 
 // ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** State for a pending frame-detection result waiting for user action. */
-type PendingDetection = {
-  uri: string;
-  result: FrameDetectionResult;
-  /** The image pixel dimensions needed to scale quad coordinates. */
-  imageSize: { width: number; height: number };
-};
-
-// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -99,30 +89,6 @@ export default function ScanScreen() {
 
   // Guard against double-navigation if onCaptured fires twice in quick succession.
   const isPersistingRef = useRef(false);
-
-  // ── Frame detection state ─────────────────────────────────────────────────
-
-  /**
-   * When set, a DetectedFrameOverlay is shown. The user can apply the cropRect
-   * or dismiss. Cleared after navigation or user action.
-   */
-  const [pendingDetection, setPendingDetection] = useState<PendingDetection | null>(null);
-
-  /**
-   * cropRect that the user approved from a frame-detection result. Carried
-   * into the Adjust screen via the router params.
-   * NOTE: expo-router's typed routes require params to be strings, so we
-   * JSON-encode the rect and let the adjust screen decode it.
-   */
-  const approvedCropRectRef = useRef<NonNullable<FrameDetectionResult['cropRect']> | null>(null);
-
-  /** Layout dimensions of the camera area container — needed to scale quad coords. */
-  const [cameraLayout, setCameraLayout] = useState({ width: 0, height: 0 });
-
-  const handleCameraLayout = useCallback((e: LayoutChangeEvent) => {
-    const { width, height } = e.nativeEvent.layout;
-    setCameraLayout({ width, height });
-  }, []);
 
   // ── Dock state ────────────────────────────────────────────────────────────
 
@@ -169,7 +135,7 @@ export default function ScanScreen() {
   // ── Capture handler ───────────────────────────────────────────────────────
 
   const handleCaptured = useCallback(
-    async (originalUri: string) => {
+    async (originalUri: string, meta: CaptureMeta) => {
       if (isPersistingRef.current) return;
       isPersistingRef.current = true;
 
@@ -183,11 +149,22 @@ export default function ScanScreen() {
           sessionId = session.id;
         }
 
-        // 2. Bridge the file:// capture into the base64 payload saveImage wants.
-        const file = new File(originalUri);
+        // 2. AUTO-CROP to the film frame BEFORE saving/processing. This is the
+        //    core fix: a held-up negative is a small part of the shot against a
+        //    bright room, which would blow the engine to white. We crop to just
+        //    the negative so the pipeline only ever sees film. On ANY failure
+        //    (no frame / low confidence / manipulator error / unknown dims) this
+        //    returns the original uri unchanged — the flow continues full-frame.
+        const cropped = await autoCropToFilmFrame(originalUri, meta.width, meta.height);
+        const sourceUri = cropped.uri;
+
+        // 3. Bridge the file:// capture into the base64 payload saveImage wants.
+        //    NOTE: after an auto-crop the file is a re-encoded JPEG; format must
+        //    track the ACTUAL file written, not the original capture container.
+        const file = new File(sourceUri);
         const imageBase64 = await file.base64();
 
-        const format = formatFromUri(originalUri);
+        const format = formatFromUri(sourceUri);
         const captureMetadata: CaptureMetadata = {
           whiteBalance: 'auto',
           format,
@@ -196,7 +173,7 @@ export default function ScanScreen() {
           whiteBalanceLocked: false,
         };
 
-        // 3. Persist the original (writes file + thumbnail + SQLite row).
+        // 4. Persist (writes file + thumbnail + SQLite row).
         const newImage = await saveImage({
           imageBase64,
           format,
@@ -205,7 +182,7 @@ export default function ScanScreen() {
           wasProAtCapture: getProStatusSync(),
         });
 
-        // 3b. Batch mode: stay on the camera and keep shooting. Just refresh the
+        // 4b. Batch mode: stay on the camera and keep shooting. Just refresh the
         //     roll so counts/thumbnails update; the user reviews & edits the whole
         //     roll later from the Gallery. (The #1 mobile-scanner workflow ask.)
         if (useCaptureStore.getState().batchMode) {
@@ -214,44 +191,10 @@ export default function ScanScreen() {
           return;
         }
 
-        // 4. Kick off auto frame-detection NON-BLOCKING — do not await here.
-        //    The detection promise resolves in the background; if it succeeds
-        //    we show the overlay BEFORE navigating so the user can approve/dismiss.
-        //    If detection fails or returns found=false we navigate immediately.
-        detectFilmFrame(originalUri)
-          .then((result) => {
-            if (result.found && result.quad) {
-              // Pause navigation — show the overlay.
-              setPendingDetection({
-                uri: originalUri,
-                result,
-                // Image dimensions: not available from the URI alone without
-                // parsing EXIF. We fall back to the camera layout dimensions
-                // as a best-effort approximation for the coordinate scaling.
-                // TODO(integration): get true image dimensions from capturePhoto result.
-                imageSize: cameraLayout.width > 0
-                  ? { width: cameraLayout.width, height: cameraLayout.height }
-                  : { width: 4032, height: 3024 }, // common 12MP default
-              });
-              // Store imageId so we can navigate after user acts.
-              pendingImageIdRef.current = newImage.id;
-            } else {
-              // No frame found — navigate immediately.
-              void store.loadGallery().then(() => {
-                router.push(`/adjust/${newImage.id}`);
-              });
-            }
-          })
-          .catch(() => {
-            // Detection failed → navigate without crop.
-            void store.loadGallery().then(() => {
-              router.push(`/adjust/${newImage.id}`);
-            });
-          });
-
-        // Note: navigation is now deferred to the detection .then() / .catch()
-        // above, or to the overlay's onApplyCrop / onDismiss handlers.
-
+        // 5. Navigate to Adjust. The image is already cropped to the film, so no
+        //    cropRect needs to be threaded through — Adjust opens on the negative.
+        await store.loadGallery();
+        router.push(`/adjust/${newImage.id}`);
       } catch (err) {
         Alert.alert(
           'Could not save scan',
@@ -261,41 +204,8 @@ export default function ScanScreen() {
         isPersistingRef.current = false;
       }
     },
-    [router, cameraLayout],
-  );
-
-  // Ref to hold the image ID while we wait for the user to act on the overlay.
-  const pendingImageIdRef = useRef<string | null>(null);
-
-  const handleApplyCrop = useCallback(
-    (cropRect: NonNullable<FrameDetectionResult['cropRect']>) => {
-      approvedCropRectRef.current = cropRect;
-      setPendingDetection(null);
-      const imageId = pendingImageIdRef.current;
-      if (imageId !== null) {
-        // Encode cropRect as a JSON query param so the Adjust screen can decode.
-        // expo-router typed-routes allow string params; we pass cropRect as a
-        // JSON string and the Adjust screen decodes it.
-        void useGalleryStore.getState().loadGallery().then(() => {
-          router.push({
-            pathname: `/adjust/${imageId}`,
-            params: { cropRect: JSON.stringify(cropRect) },
-          } as Parameters<typeof router.push>[0]);
-        });
-      }
-    },
     [router],
   );
-
-  const handleDismissDetection = useCallback(() => {
-    setPendingDetection(null);
-    const imageId = pendingImageIdRef.current;
-    if (imageId !== null) {
-      void useGalleryStore.getState().loadGallery().then(() => {
-        router.push(`/adjust/${imageId}`);
-      });
-    }
-  }, [router]);
 
   const handleError = useCallback((error: unknown) => {
     Alert.alert(
@@ -339,23 +249,12 @@ export default function ScanScreen() {
         </View>
       ) : null}
 
-      <View style={styles.cameraArea} onLayout={handleCameraLayout}>
+      <View style={styles.cameraArea}>
         <CameraScanView
-          isActive={isFocused && !pendingDetection}
-          onCaptured={(uri) => void handleCaptured(uri)}
+          isActive={isFocused}
+          onCaptured={(uri, meta) => void handleCaptured(uri, meta)}
           onError={handleError}
         />
-
-        {/* Detected-frame overlay — shown non-blockingly after capture */}
-        {pendingDetection !== null ? (
-          <DetectedFrameOverlay
-            detection={pendingDetection.result}
-            imageSize={pendingDetection.imageSize}
-            containerSize={cameraLayout}
-            onApplyCrop={handleApplyCrop}
-            onDismiss={handleDismissDetection}
-          />
-        ) : null}
 
         {/* Batch capture controls — shoot a whole roll, review/edit later */}
         <View style={styles.batchBar} pointerEvents="box-none">

@@ -17,3 +17,6 @@ export type { AIToggleRowProps } from './AIToggleRow';
 export { FilmProfilePicker } from './FilmProfilePicker';
 
 export { BeforeAfterCompare } from './BeforeAfterCompare';
+
+export { AdvancedSection } from './AdvancedSection';
+export type { AdvancedSectionProps } from './AdvancedSection';
