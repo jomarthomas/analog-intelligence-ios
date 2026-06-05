@@ -47,6 +47,7 @@ import { useCameraPermissions } from '@/camera/useCameraPermissions';
 import { useFrameProcessors } from '@/camera/useFrameProcessors';
 import { readCapabilities, readSnapshot } from '@/camera/cameraController';
 import { capturePhoto } from '@/camera/capturePhoto';
+import { averageFrames } from '../../modules/ai-image-processing';
 import { CAPTURE_FORMATS, CAPTURE_FORMAT_ORDER, type CaptureFormat } from '@/camera/types';
 import { FrameAlignmentOverlay } from '@/features/scan/FrameAlignmentOverlay';
 import { FocusPeakingOverlay } from '@/features/scan/FocusPeakingOverlay';
@@ -104,6 +105,7 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
   const torchEnabled = useCaptureStore((s) => s.torchEnabled);
   const flashMode = useCaptureStore((s) => s.flashMode);
   const isCapturing = useCaptureStore((s) => s.isCapturing);
+  const multiShot = useCaptureStore((s) => s.multiShot);
   const showFrameGuide = useCaptureStore((s) => s.showFrameGuide);
   const focusPeakingEnabled = useCaptureStore((s) => s.focusPeakingEnabled);
   const peakingSensitivity = useCaptureStore((s) => s.peakingSensitivity);
@@ -188,12 +190,31 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
     if (isCapturing || !sessionReady) return;
     setIsCapturing(true);
     try {
-      const result = await capturePhoto(photoOutput, {
-        format: effectiveFormat,
-        flashMode,
-        supportsRaw: capabilities.supportsRawCapture,
-      });
-      onCaptured(result.uri);
+      if (multiShot) {
+        // Multi-shot denoise: capture a quick burst and average it (~√N less
+        // sensor noise; best on a copy-stand since frames aren't registered).
+        // Frames must be decodable (never RAW) for averageFrames.
+        const FRAMES = 4;
+        const burstFormat = effectiveFormat === 'dng' ? 'heic' : effectiveFormat;
+        const uris: string[] = [];
+        for (let i = 0; i < FRAMES; i += 1) {
+          const r = await capturePhoto(photoOutput, {
+            format: burstFormat,
+            flashMode,
+            supportsRaw: false,
+          });
+          uris.push(r.uri);
+        }
+        const averaged = await averageFrames(uris);
+        onCaptured(averaged.uri);
+      } else {
+        const result = await capturePhoto(photoOutput, {
+          format: effectiveFormat,
+          flashMode,
+          supportsRaw: capabilities.supportsRawCapture,
+        });
+        onCaptured(result.uri);
+      }
     } catch (err) {
       if (__DEV__) {
         console.error('[CameraScanView] capture failed:', err);
@@ -205,6 +226,7 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
   }, [
     isCapturing,
     sessionReady,
+    multiShot,
     photoOutput,
     effectiveFormat,
     flashMode,

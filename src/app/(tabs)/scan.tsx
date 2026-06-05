@@ -157,6 +157,8 @@ export default function ScanScreen() {
   // ── Batch capture mode ────────────────────────────────────────────────────
   const batchMode = useCaptureStore((s) => s.batchMode);
   const toggleBatchMode = useCaptureStore((s) => s.toggleBatchMode);
+  const multiShot = useCaptureStore((s) => s.multiShot);
+  const toggleMultiShot = useCaptureStore((s) => s.toggleMultiShot);
   const [batchCount, setBatchCount] = useState(0);
 
   const handleToggleBatch = useCallback(() => {
@@ -365,6 +367,16 @@ export default function ScanScreen() {
             style={[styles.batchPill, batchMode && styles.batchPillActive]}>
             <Text style={[styles.batchPillText, batchMode && styles.batchPillTextActive]}>
               {batchMode ? `Batch · ${batchCount}` : 'Batch'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={toggleMultiShot}
+            accessibilityRole="button"
+            accessibilityState={{ selected: multiShot }}
+            accessibilityLabel="Multi-shot denoise mode"
+            style={[styles.batchPill, multiShot && styles.batchPillActive]}>
+            <Text style={[styles.batchPillText, multiShot && styles.batchPillTextActive]}>
+              {multiShot ? 'Multi · 4' : 'Multi'}
             </Text>
           </TouchableOpacity>
           {batchMode && batchCount > 0 ? (
