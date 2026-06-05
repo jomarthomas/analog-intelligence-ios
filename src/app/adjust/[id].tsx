@@ -43,12 +43,14 @@ import {
   PARAM_RANGES,
   fromSnapshot,
   usePipeline,
+  applyFilmProfile,
+  NEUTRAL_PROFILE_ID,
 } from '@/processing';
-import type { FullProcessParams } from '@/processing';
+import type { FullProcessParams, FilmProfile } from '@/processing';
 import { ProGate } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
 
-import { AdjustPreview, AdjustSlider, AIToggleRow } from '@/features/adjust';
+import { AdjustPreview, AdjustSlider, AIToggleRow, FilmProfilePicker } from '@/features/adjust';
 import { Histogram } from '@/insights';
 import { analyzeHistogram } from '../../../modules/ai-image-processing';
 import type { Histogram as HistogramData } from '../../../modules/ai-image-processing';
@@ -234,6 +236,36 @@ function AdjustScreenBody({
 
   const pipeline = usePipeline({ imageId, originalUri, initialParams });
   const [isCommitting, setIsCommitting] = useState(false);
+  const [profileId, setProfileId] = useState<string>(NEUTRAL_PROFILE_ID);
+
+  // Selecting a film/lab look resets the 7 user-adjustment sliders to that
+  // profile's values (applied over neutral), which the live preview re-renders.
+  const handleSelectProfile = useCallback(
+    (profile: FilmProfile) => {
+      setProfileId(profile.id);
+      const neutral: FullProcessParams = {
+        ...pipeline.params,
+        exposure: 0,
+        warmth: 0,
+        contrast: 0,
+        saturation: 0,
+        highlights: 0,
+        shadows: 0,
+        vibrance: 0,
+      };
+      const looked = applyFilmProfile(neutral, profile.id);
+      pipeline.mergeParams({
+        exposure: looked.exposure,
+        warmth: looked.warmth,
+        contrast: looked.contrast,
+        saturation: looked.saturation,
+        highlights: looked.highlights,
+        shadows: looked.shadows,
+        vibrance: looked.vibrance,
+      });
+    },
+    [pipeline],
+  );
 
   // Live histogram on the current preview URI (debounced, race-guarded).
   const { histogram, isLoading: isHistogramLoading } = useLiveHistogram(pipeline.previewUri);
@@ -320,6 +352,12 @@ function AdjustScreenBody({
               </Text>
             </View>
           )}
+        </View>
+
+        {/* Film / lab look */}
+        <SectionHeader title="Look" />
+        <View style={styles.profilePicker}>
+          <FilmProfilePicker selectedId={profileId} onSelect={handleSelectProfile} />
         </View>
 
         {/* Adjustments */}
@@ -428,6 +466,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     paddingTop: Spacing.md,
     paddingBottom: Spacing.xxl,
+  },
+  profilePicker: {
+    // Full-bleed horizontal scroll: cancel the content's horizontal padding so
+    // the chip row reaches the screen edges and scrolls naturally.
+    marginHorizontal: -Spacing.md,
+    marginBottom: Spacing.sm,
   },
   histogramContainer: {
     marginTop: Spacing.sm,

@@ -13,3 +13,5 @@ export type { AdjustSliderProps } from './AdjustSlider';
 
 export { AIToggleRow } from './AIToggleRow';
 export type { AIToggleRowProps } from './AIToggleRow';
+
+export { FilmProfilePicker } from './FilmProfilePicker';

@@ -52,6 +52,7 @@ import { saveImage } from '@/storage';
 import type { CaptureMetadata } from '@/storage';
 import { useGalleryStore } from '@/state/galleryStore';
 import { useDockStore } from '@/state/useDockStore';
+import { useCaptureStore } from '@/state/captureStore';
 import { Screen } from '@/theme/screen';
 import { Palette, Spacing, FontSize, FontWeight, Radius } from '@/theme';
 
@@ -153,6 +154,16 @@ export default function ScanScreen() {
     }
   }, [dockStatus.state, dockStatus.lastError, dockDisconnect]);
 
+  // ── Batch capture mode ────────────────────────────────────────────────────
+  const batchMode = useCaptureStore((s) => s.batchMode);
+  const toggleBatchMode = useCaptureStore((s) => s.toggleBatchMode);
+  const [batchCount, setBatchCount] = useState(0);
+
+  const handleToggleBatch = useCallback(() => {
+    setBatchCount(0);
+    toggleBatchMode();
+  }, [toggleBatchMode]);
+
   // ── Capture handler ───────────────────────────────────────────────────────
 
   const handleCaptured = useCallback(
@@ -191,6 +202,15 @@ export default function ScanScreen() {
           captureMetadata,
           wasProAtCapture: getProStatusSync(),
         });
+
+        // 3b. Batch mode: stay on the camera and keep shooting. Just refresh the
+        //     roll so counts/thumbnails update; the user reviews & edits the whole
+        //     roll later from the Gallery. (The #1 mobile-scanner workflow ask.)
+        if (useCaptureStore.getState().batchMode) {
+          await store.loadGallery();
+          setBatchCount((c) => c + 1);
+          return;
+        }
 
         // 4. Kick off auto frame-detection NON-BLOCKING — do not await here.
         //    The detection promise resolves in the background; if it succeeds
@@ -334,6 +354,29 @@ export default function ScanScreen() {
             onDismiss={handleDismissDetection}
           />
         ) : null}
+
+        {/* Batch capture controls — shoot a whole roll, review/edit later */}
+        <View style={styles.batchBar} pointerEvents="box-none">
+          <TouchableOpacity
+            onPress={handleToggleBatch}
+            accessibilityRole="button"
+            accessibilityState={{ selected: batchMode }}
+            accessibilityLabel="Batch capture mode"
+            style={[styles.batchPill, batchMode && styles.batchPillActive]}>
+            <Text style={[styles.batchPillText, batchMode && styles.batchPillTextActive]}>
+              {batchMode ? `Batch · ${batchCount}` : 'Batch'}
+            </Text>
+          </TouchableOpacity>
+          {batchMode && batchCount > 0 ? (
+            <TouchableOpacity
+              onPress={() => router.push('/gallery')}
+              accessibilityRole="button"
+              accessibilityLabel={`Review ${batchCount} captured frames`}
+              style={styles.reviewPill}>
+              <Text style={styles.reviewPillText}>Review {batchCount}</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
       </View>
 
       {/* Dock controls — shown below camera when connected */}
@@ -435,6 +478,48 @@ function DockControls({
 const styles = StyleSheet.create({
   cameraArea: {
     flex: 1,
+  },
+  // Batch controls — over the always-dark viewfinder, so fixed monochrome.
+  batchBar: {
+    position: 'absolute',
+    top: Spacing.md,
+    left: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  batchPill: {
+    paddingVertical: 6,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.full,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  batchPillActive: {
+    backgroundColor: Palette.ink,
+    borderColor: Palette.ink,
+  },
+  batchPillText: {
+    color: Palette.ink,
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
+    letterSpacing: 0.3,
+  },
+  batchPillTextActive: {
+    color: Palette.black,
+  },
+  reviewPill: {
+    paddingVertical: 6,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.full,
+    backgroundColor: Palette.ink,
+  },
+  reviewPillText: {
+    color: Palette.black,
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
+    letterSpacing: 0.3,
   },
   dockBarWrap: {
     paddingHorizontal: Spacing.md,

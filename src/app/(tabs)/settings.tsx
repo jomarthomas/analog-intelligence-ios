@@ -35,6 +35,7 @@ import {
   type UserPreferences,
 } from '@/storage';
 import { SettingsToggleRow } from '@/features/settings';
+import { LightboxModal } from '@/components/lightbox-modal';
 import { useDockStore } from '@/state/useDockStore';
 
 const EXPORT_FORMATS: ExportFormat[] = ['jpeg', 'heic', 'png', 'tiff'];
@@ -51,6 +52,7 @@ export default function SettingsScreen() {
   // Mirror MMKV prefs in local state for instant re-render on toggle.
   const [prefs, setPrefs] = useState<UserPreferences>(() => getPreferences());
   const [stats, setStats] = useState<StorageStats | null>(null);
+  const [lightboxVisible, setLightboxVisible] = useState(false);
 
   // Dock store for the Developer → Simulate Dock row.
   const dockStatus = useDockStore((s) => s.status);
@@ -252,6 +254,18 @@ export default function SettingsScreen() {
           <ListRow label="Version" value={appVersion} showSeparator={false} />
         </Card>
 
+        {/* Tools */}
+        <SectionHeader title="Tools" />
+        <Card padding="none">
+          <ListRow
+            label="Lightbox"
+            value="Backlight"
+            showChevron
+            onPress={() => setLightboxVisible(true)}
+            showSeparator={false}
+          />
+        </Card>
+
         {/* Developer section — always visible; docked state is togglable */}
         <SectionHeader title="Developer" />
         <Card padding="none">
@@ -274,6 +288,11 @@ export default function SettingsScreen() {
           </Text>
         </View>
       </ScrollView>
+
+      <LightboxModal
+        visible={lightboxVisible}
+        onClose={() => setLightboxVisible(false)}
+      />
     </Screen>
   );
 }
