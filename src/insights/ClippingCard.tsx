@@ -58,9 +58,11 @@ function severity(pct: number): Severity {
  * SymbolView / expo-symbols can be used on iOS; text fallbacks here keep the
  * component cross-platform without a conditional import.
  */
+// Monochrome geometric glyphs (filled = shadows/dark, hollow = highlights/light)
+// — they inherit the text colour, staying coherent with the black-&-white theme.
 const ICON: Record<ClippingVariant, string> = {
-  shadow: '🌑',
-  highlight: '☀️',
+  shadow: '●',
+  highlight: '○',
 };
 
 const VARIANT_LABEL: Record<ClippingVariant, string> = {

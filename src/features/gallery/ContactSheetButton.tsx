@@ -51,7 +51,7 @@ function ContactSheetInner() {
           cellWidth: CELL_WIDTH,
           cellHeight: CELL_HEIGHT,
           padding: PADDING,
-          backgroundColor: '#141418',
+          backgroundColor: '#171717',
           showFrameNumbers: true,
           jpegQuality: 90,
         });
