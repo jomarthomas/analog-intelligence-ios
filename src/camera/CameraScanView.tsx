@@ -45,6 +45,7 @@ import { Button, Palette, Spacing, FontSize, FontWeight, Radius } from '@/theme'
 import { useCaptureStore, PEAKING_THRESHOLDS } from '@/state/captureStore';
 import { useCameraPermissions } from '@/camera/useCameraPermissions';
 import { useFrameProcessors } from '@/camera/useFrameProcessors';
+import { useCaptureGuidance } from '@/camera/useCaptureGuidance';
 import { readCapabilities, readSnapshot } from '@/camera/cameraController';
 import { capturePhoto } from '@/camera/capturePhoto';
 import { averageFrames } from '../../modules/ai-image-processing';
@@ -149,6 +150,9 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
   );
 
   const [sessionReady, setSessionReady] = useState(false);
+
+  // Live lighting guidance — runs only while the camera is active + idle.
+  const guidance = useCaptureGuidance(isActive && sessionReady && !isCapturing);
 
   // Pull capabilities + initial 3A snapshot once the controller is bound.
   const refreshFromController = useCallback(() => {
@@ -267,7 +271,7 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           style={StyleSheet.absoluteFill}
           device={device}
           isActive={isActive}
-          outputs={[photoOutput, ...frame.outputs]}
+          outputs={[photoOutput, guidance.output, ...frame.outputs]}
           torchMode={torchEnabled ? 'on' : 'off'}
           resizeMode="cover"
           onStarted={handleStarted}
@@ -284,6 +288,25 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           peakCells={frame.peakCells}
           peakingColor={peakingColor}
         />
+      ) : null}
+
+      {/* Live lighting guidance chip */}
+      {guidance.hint ? (
+        <View
+          style={{ position: 'absolute', top: 96, left: 0, right: 0, alignItems: 'center' }}
+          pointerEvents="none">
+          <View
+            style={{
+              backgroundColor: Palette.darkOverlay,
+              paddingHorizontal: Spacing.md,
+              paddingVertical: Spacing.xs,
+              borderRadius: 999,
+            }}>
+            <Text style={{ color: Palette.ink, fontSize: FontSize.sm, fontWeight: '600' }}>
+              {guidance.hint.message}
+            </Text>
+          </View>
+        </View>
       ) : null}
 
       {/* Top controls: flash + format picker */}
