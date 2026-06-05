@@ -112,6 +112,7 @@ function rowToImage(row: ImageRow): ScannedImage {
     isRaw: row.is_raw === 1,
     wasProAtCapture: row.was_pro_at_capture === 1,
     captureMetadata,
+    frameNote: row.frame_note ?? undefined,
     processParams,
     exposureMetrics,
     exportHistory,
@@ -129,6 +130,10 @@ function rowToSession(row: SessionRow): ScanSession {
     filmType: (row.film_type as ScanSession['filmType']) ?? undefined,
     filmBrand: row.film_brand ?? undefined,
     filmSpeed: row.film_speed ?? undefined,
+    exposureIndex: row.exposure_index ?? undefined,
+    camera: row.camera ?? undefined,
+    lens: row.lens ?? undefined,
+    shotDate: row.shot_date ?? undefined,
     sessionState: row.session_state as ScanSession['sessionState'],
     imageIds,
   };
@@ -374,6 +379,28 @@ export async function saveExposureMetrics(
 }
 
 /**
+ * Update the free-text note attached to a single frame.
+ * Pass `undefined` (or an empty string) to clear the note.
+ */
+export async function updateImageNote(
+  imageId: string,
+  note: string | undefined,
+): Promise<void> {
+  const db = await openDatabase();
+  const now = nowIso();
+  const value = note && note.trim().length > 0 ? note : null;
+
+  const result = await db.runAsync(
+    `UPDATE images SET frame_note = ?, updated_at = ? WHERE id = ?`,
+    [value, now, imageId],
+  );
+
+  if (result.changes === 0) {
+    throw new StorageError(`Image not found: ${imageId}`, 'IMAGE_NOT_FOUND');
+  }
+}
+
+/**
  * Append an export record to an image's audit trail.
  */
 export async function addExportRecord(
@@ -491,8 +518,9 @@ export async function saveSession(session: ScanSession): Promise<void> {
   await db.runAsync(
     `INSERT OR REPLACE INTO sessions
        (id, created_at, updated_at, name, notes, film_type, film_brand,
-        film_speed, session_state, image_ids)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        film_speed, exposure_index, camera, lens, shot_date,
+        session_state, image_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       session.id,
       session.createdAt,
@@ -502,6 +530,10 @@ export async function saveSession(session: ScanSession): Promise<void> {
       session.filmType ?? null,
       session.filmBrand ?? null,
       session.filmSpeed ?? null,
+      session.exposureIndex ?? null,
+      session.camera ?? null,
+      session.lens ?? null,
+      session.shotDate ?? null,
       session.sessionState,
       JSON.stringify(session.imageIds),
     ],
@@ -521,6 +553,10 @@ export async function updateSession(
       | 'filmType'
       | 'filmBrand'
       | 'filmSpeed'
+      | 'exposureIndex'
+      | 'camera'
+      | 'lens'
+      | 'shotDate'
       | 'sessionState'
       | 'imageIds'
     >
@@ -793,8 +829,9 @@ async function insertImageRow(image: ScannedImage): Promise<void> {
     `INSERT INTO images
        (id, session_id, created_at, updated_at, original_uri, processed_uri,
         thumbnail_uri, is_processed, is_raw, was_pro_at_capture,
-        capture_metadata, process_params, exposure_metrics, export_history)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        capture_metadata, process_params, exposure_metrics, export_history,
+        frame_note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       image.id,
       image.sessionId,
@@ -810,6 +847,7 @@ async function insertImageRow(image: ScannedImage): Promise<void> {
       image.processParams ? JSON.stringify(image.processParams) : null,
       image.exposureMetrics ? JSON.stringify(image.exposureMetrics) : null,
       JSON.stringify(image.exportHistory),
+      image.frameNote ?? null,
     ],
   );
 }

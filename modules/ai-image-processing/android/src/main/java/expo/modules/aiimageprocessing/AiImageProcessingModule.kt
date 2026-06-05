@@ -45,11 +45,16 @@ class AiImageProcessingModule : Module() {
     @Field val exposure: Double = 0.0
     @Field val warmth: Double = 0.0
     @Field val contrast: Double = 0.0
-    @Field val mode: String = "color" // "color" | "bw"
+    @Field val mode: String = "color" // "color" | "bw" | "slide"
     @Field val removeOrangeMask: Boolean = true
     @Field val sharpen: Double = 0.0
     @Field val aiColor: Boolean = false
     @Field val aiDustRemoval: Boolean = false
+    // Optional reduced-resolution cap (longer-edge px). <= 0 means full res.
+    // When set and the source's longer edge exceeds it, the bitmap is
+    // downscaled (aspect-preserving) BEFORE the per-pixel FloatArray passes —
+    // a live-preview fast path and an OOM guard for large captures.
+    @Field val maxDimension: Double = 0.0
     @Field val saturation: Double = 0.0
     @Field val highlights: Double = 0.0
     @Field val shadows: Double = 0.0
@@ -216,13 +221,23 @@ class AiImageProcessingModule : Module() {
   // MARK: - Pipeline (mirrors ImageProcessor.processNegative steps 2–8)
 
   private fun runPipeline(source: Bitmap, params: ProcessParams): Bitmap {
-    val w = source.width
-    val h = source.height
+    // Step 0 — optional reduced-resolution fast path. Downscale BEFORE we
+    // allocate the three full-resolution FloatArray(n) buffers, so a large
+    // capture (e.g. 48 MP) processed for a live preview cannot OOM. <= 0 ⇒
+    // unchanged full-resolution behaviour. The downscaled bitmap is recycled
+    // before we return.
+    val workSource = downscaleToMaxDimension(source, params.maxDimension)
+
+    val w = workSource.width
+    val h = workSource.height
     val n = w * h
 
     // Read source pixels into a flat ARGB int buffer.
     val argb = IntArray(n)
-    source.getPixels(argb, 0, w, 0, 0, w, h)
+    workSource.getPixels(argb, 0, w, 0, 0, w, h)
+    // The scaled copy is no longer needed once pixels are read (do not recycle
+    // the caller-owned `source`, only our private downscaled copy).
+    if (workSource != source) workSource.recycle()
 
     // Decompose into linear-light float channels [0,1].
     // Step 2 — linearize (CILinearToSRGBToneCurve == sRGB -> linear transfer).
@@ -236,31 +251,55 @@ class AiImageProcessingModule : Module() {
       b[i] = srgbToLinear((p and 0xFF) / 255f)
     }
 
-    val isColor = params.mode != "bw"
+    // "slide" is an already-POSITIVE E-6 source; "color"/"bw" are negatives.
+    val isSlide = params.mode == "slide"
+    val isColor = params.mode == "color" // bw and slide are not "color"
 
-    // Step 3 — invert negative (CIColorInvert): out = 1 - in (in linear light,
-    // matching the iOS graph which inverts after linearizing).
-    for (i in 0 until n) {
-      r[i] = 1f - r[i]; g[i] = 1f - g[i]; b[i] = 1f - b[i]
+    if (isSlide) {
+      // Slide / E-6 positive path: SKIP inversion AND orange-mask removal, and
+      // SKIP the negative-oriented gray-world + auto-tone-curve. Apply one
+      // gentle black/white-point normalization instead. (legacy FilmType.slide)
+      normalizeSlide(r, g, b)
+    } else {
+      // Colour / B&W negative path (unchanged).
+
+      // Step 4a — film-base (rebate) sampling reads the PRE-invert pixels, so do
+      // it now while r/g/b still hold the pre-invert values. Sampling before the
+      // in-place inversion avoids any extra full-resolution FloatArray copy
+      // (important for the large captures `maxDimension` targets). Null ⇒ no
+      // convincing base, defer to the dark-region fallback after inversion.
+      val baseMask: OrangeMask? =
+        if (isColor && params.removeOrangeMask) estimateMaskFromFilmBase(r, g, b, w, h)
+        else null
+
+      // Step 3 — invert negative (CIColorInvert): out = 1 - in (in linear light,
+      // matching the iOS graph which inverts after linearizing).
+      for (i in 0 until n) {
+        r[i] = 1f - r[i]; g[i] = 1f - g[i]; b[i] = 1f - b[i]
+      }
+
+      // Step 4 — orange mask removal (colour only). OrangeMaskEstimator.
+      if (isColor && params.removeOrangeMask) {
+        // Prefer the film-base estimate; else fall back to the legacy
+        // darkest-region method on the now-inverted channels.
+        val mask = baseMask ?: estimateMaskFromDarkRegions(r, g, b, w, h)
+        removeOrangeMask(r, g, b, mask)
+      }
+
+      // Step 5 — gray-world channel normalization. ColorCorrector.normalizeChannels.
+      normalizeChannels(r, g, b)
+
+      // Step 6 — automatic tone curve. ColorCorrector.applyToneCorrection.
+      applyToneCorrection(r, g, b)
     }
-
-    // Step 4 — orange mask removal (colour only). OrangeMaskEstimator.
-    if (isColor && params.removeOrangeMask) {
-      val mask = estimateOrangeMask(r, g, b, w, h)
-      removeOrangeMask(r, g, b, mask)
-    }
-
-    // Step 5 — gray-world channel normalization. ColorCorrector.normalizeChannels.
-    normalizeChannels(r, g, b)
-
-    // Step 6 — automatic tone curve. ColorCorrector.applyToneCorrection.
-    applyToneCorrection(r, g, b)
 
     // Step 7 — user adjustments, in the legacy order. UserAdjustments.
+    // Applied for ALL modes including slide.
     applyUserAdjustments(r, g, b, params)
 
     // B&W: collapse to luminance (matches the iOS FilmType.blackAndWhite path).
-    if (!isColor) {
+    // Slide is a colour positive, so it is NOT desaturated.
+    if (params.mode == "bw") {
       for (i in 0 until n) {
         val l = 0.2126f * r[i] + 0.7152f * g[i] + 0.0722f * b[i]
         r[i] = l; g[i] = l; b[i] = l
@@ -286,6 +325,85 @@ class AiImageProcessingModule : Module() {
     return result
   }
 
+  // MARK: Step 0 — optional reduced-resolution scaling (maxDimension)
+
+  /**
+   * Return a bitmap whose longer edge is at most [maxDimension] px (aspect
+   * preserved), or the original [source] unchanged when [maxDimension] <= 0 or
+   * the source already fits. When a downscale happens the returned bitmap is a
+   * NEW bitmap that the caller must recycle; when no downscale happens the
+   * SAME [source] reference is returned (caller must NOT recycle it as a copy).
+   *
+   * This runs before the per-pixel float passes so a big capture used for a
+   * live preview never allocates full-resolution FloatArray buffers.
+   */
+  private fun downscaleToMaxDimension(source: Bitmap, maxDimension: Double): Bitmap {
+    if (maxDimension <= 0.0) return source
+    val cap = maxDimension.toInt()
+    if (cap <= 0) return source
+    val longer = max(source.width, source.height)
+    if (longer <= cap) return source
+
+    val scale = cap.toFloat() / longer.toFloat()
+    val dw = max(1, (source.width * scale).roundToInt())
+    val dh = max(1, (source.height * scale).roundToInt())
+    return try {
+      Bitmap.createScaledBitmap(source, dw, dh, true)
+    } catch (e: OutOfMemoryError) {
+      // If even the scaled allocation fails, fall back to full-res processing.
+      source
+    }
+  }
+
+  // MARK: Slide normalization (gentle positive black/white-point stretch)
+
+  /**
+   * Gentle normalization for an already-positive slide, the cross-platform twin
+   * of the iOS `normalizeSlide`. Unlike `applyToneCorrection` (which applies an
+   * aggressive brightness=log2(1/range) + contrast + gamma to recover an
+   * inverted negative), this only stretches the 1%/99% luminance points to
+   * [0,1] with NO added contrast/gamma, so a correctly-exposed E-6 frame is
+   * largely preserved. The black/white points are found from a BT.601 luminance
+   * histogram in sRGB-encoded space (matching the negative tone path's domain),
+   * and the stretch is applied equally to all three linear channels.
+   */
+  private fun normalizeSlide(r: FloatArray, g: FloatArray, b: FloatArray) {
+    val n = r.size
+
+    val hist = DoubleArray(256)
+    for (i in 0 until n) {
+      val rs = linearToSrgb(clamp01(r[i]))
+      val gs = linearToSrgb(clamp01(g[i]))
+      val bs = linearToSrgb(clamp01(b[i]))
+      val lum = 0.299f * rs + 0.587f * gs + 0.114f * bs
+      hist[min((lum * 255f).toInt(), 255)] += 1.0
+    }
+    var total = 0.0
+    for (v in hist) total += v
+    val safeTotal = max(total, 1.0)
+
+    var blackPoint = 0f
+    var whitePoint = 1f
+    var cumulative = 0.0
+    for (bin in 0 until 256) {
+      cumulative += hist[bin]
+      val cdf = cumulative / safeTotal
+      if (cdf >= 0.01 && blackPoint == 0f) blackPoint = bin / 255f
+      if (cdf >= 0.99) { whitePoint = bin / 255f; break }
+    }
+
+    // Map [blackPoint, whitePoint] -> [0,1] as a neutral slope+bias in
+    // sRGB-encoded space, then round-trip back to linear (the working space).
+    val range = max(whitePoint - blackPoint, 0.05f)
+    val slope = 1f / range
+    val bias = -blackPoint / range
+    for (i in 0 until n) {
+      r[i] = srgbToLinear(clamp01(linearToSrgb(clamp01(r[i])) * slope + bias))
+      g[i] = srgbToLinear(clamp01(linearToSrgb(clamp01(g[i])) * slope + bias))
+      b[i] = srgbToLinear(clamp01(linearToSrgb(clamp01(b[i])) * slope + bias))
+    }
+  }
+
   // MARK: - Colour transfer functions (sRGB IEC 61966-2-1)
 
   private fun srgbToLinear(c: Float): Float =
@@ -307,14 +425,89 @@ class AiImageProcessingModule : Module() {
 
   private val defaultMask = OrangeMask(1.0f, 0.65f, 0.4f, 0.6f)
 
+  // Orange-mask estimation now **prefers film-base (rebate) sampling** — the
+  // Android twin of the iOS `estimateOrangeMask(image:preInvert:)`.
+  //
+  // Pro film-scanning derives the mask from the unexposed film *base*, which in
+  // a colour NEGATIVE is the BRIGHTEST, most-saturated-orange region (max
+  // density base) of the image BEFORE inversion (high R, mid G, low B) — more
+  // reliable than sampling whatever is darkest after inversion (which may be a
+  // scene shadow). `runPipeline` calls `estimateMaskFromFilmBase` on the
+  // pre-invert channels FIRST (so no extra full-res copy is needed) and falls
+  // back to `estimateMaskFromDarkRegions` on the post-invert channels when no
+  // convincing base is found. Both return densities in the SAME post-invert
+  // convention the unchanged `removeOrangeMask` expects, so only the *estimate
+  // source* improves.
+
   /**
-   * Port of OrangeMaskEstimator.estimateOrangeMask. The legacy code samples a
-   * 10% downsample rendered to *sRGB* bytes and thresholds with BT.601 luma in
-   * 0..255. We replicate that exactly: convert our linear channels back to
-   * sRGB 0..255 for sampling, take every ~Nth pixel as the 10% downsample,
-   * collect dark pixels (luma < 51), average the 100 darkest.
+   * Sample the brightest, most-saturated-orange region of the PRE-invert image
+   * (the film base). Returns null if no convincing orange base is present so the
+   * caller can fall back to the legacy dark-region method. Thresholds are
+   * deterministic and mirror the iOS `estimateMaskFromFilmBase`.
    */
-  private fun estimateOrangeMask(r: FloatArray, g: FloatArray, b: FloatArray, w: Int, h: Int): OrangeMask {
+  private fun estimateMaskFromFilmBase(
+    preR: FloatArray, preG: FloatArray, preB: FloatArray, w: Int, h: Int
+  ): OrangeMask? {
+    val n = w * h
+    val targetSamples = max(1, (n * 0.1).toInt())
+    val stride = max(1, n / targetSamples)
+
+    data class BasePx(val r: Float, val g: Float, val b: Float, val lum: Float)
+    val base = ArrayList<BasePx>()
+    var i = 0
+    while (i < n) {
+      val rs = linearToSrgb(clamp01(preR[i])) * 255f
+      val gs = linearToSrgb(clamp01(preG[i])) * 255f
+      val bs = linearToSrgb(clamp01(preB[i])) * 255f
+      val lum = 0.299f * rs + 0.587f * gs + 0.114f * bs
+      // Orange ordering with margin, and bright enough to be the base.
+      val orange = (rs > gs + 10f) && (gs > bs + 5f)
+      if (lum > 120f && orange) base.add(BasePx(rs / 255f, gs / 255f, bs / 255f, lum))
+      i += stride
+    }
+
+    // Need a convincing amount of base to trust this estimate.
+    if (base.size < 100) return null
+
+    // Average the 100 BRIGHTEST orange-base pixels (max-density base).
+    base.sortByDescending { it.lum }
+    val samples = base.subList(0, 100)
+    val avgR = samples.sumOf { it.r.toDouble() }.toFloat() / 100f
+    val avgG = samples.sumOf { it.g.toDouble() }.toFloat() / 100f
+    val avgB = samples.sumOf { it.b.toDouble() }.toFloat() / 100f
+
+    return densitiesFromBase(avgR, avgG, avgB)
+  }
+
+  /**
+   * Convert a sampled film-base colour into the post-invert density convention.
+   * The removal step expects densities derived from the *inverted* base
+   * (`1 - base`), normalized to red, so the CIColorMatrix-equivalent gains are
+   * identical to before — only the estimate is better. Mirrors iOS
+   * `densitiesFromBase`.
+   */
+  private fun densitiesFromBase(baseR: Float, baseG: Float, baseB: Float): OrangeMask {
+    val r = clamp01(1f - baseR)
+    val g = clamp01(1f - baseG)
+    val b = clamp01(1f - baseB)
+    val safeR = max(r, 0.0001f)
+    val range = maxOf(r, g, b) - minOf(r, g, b)
+    return OrangeMask(
+      redDensity = 1.0f,
+      greenDensity = g / safeR,
+      blueDensity = b / safeR,
+      strength = if (range > 0.1f) min(1.0f, range * 2.0f) else 0.3f
+    )
+  }
+
+  /**
+   * Legacy fallback — port of OrangeMaskEstimator.estimateOrangeMask. Samples a
+   * 10% nearest-neighbour downsample in sRGB 0..255, thresholds dark pixels with
+   * BT.601 luma < 51, and averages the 100 darkest.
+   */
+  private fun estimateMaskFromDarkRegions(
+    r: FloatArray, g: FloatArray, b: FloatArray, w: Int, h: Int
+  ): OrangeMask {
     val n = w * h
     // Stride that yields ~10% of pixels (nearest-neighbour downsample stand-in
     // for CILanczosScaleTransform @ 0.1; sufficient for dark-region statistics).

@@ -8,13 +8,17 @@
  *
  * Pipeline stages (faithful to `ImageProcessor.swift`):
  *   1. linearize sRGB → linear RGB
- *   2. invert negative
- *   3. estimate + remove orange mask (colour mode, when enabled)
- *   4. normalize channels (gray-world)
- *   5. automatic tone curve
+ *   2. invert negative              (skipped for `mode: 'slide'`)
+ *   3. estimate + remove orange mask (colour mode, when enabled; skipped for slide)
+ *   4. normalize channels (gray-world; a gentler normalize for slide)
+ *   5. automatic tone curve          (skipped for slide — source is a positive)
  *   6. user exposure / warmth / contrast (+ optional saturation/…)
  *   7. sharpen
  *   8. encode back to sRGB and export to a cache file
+ *
+ * `ProcessParams.maxDimension` (optional) caps the longer edge the engine
+ * processes — a live-preview fast path that downscales before the per-pixel
+ * passes (Android OOM guard) or a GPU Lanczos scale (iOS); omit for full res.
  *
  * This module's exports are the SHARED CONTRACT for the Pipeline workstream.
  *
@@ -63,6 +67,8 @@ function withDefaults(params: ProcessParams): Required<ProcessParams> {
     sharpen: params.sharpen,
     aiColor: params.aiColor ?? false,
     aiDustRemoval: params.aiDustRemoval ?? false,
+    // 0 ⇒ "unset" — native treats <= 0 as full-resolution (no downscale).
+    maxDimension: params.maxDimension ?? 0,
     saturation: params.saturation ?? 0,
     highlights: params.highlights ?? 0,
     shadows: params.shadows ?? 0,

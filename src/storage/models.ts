@@ -216,6 +216,13 @@ export interface ScannedImage {
   // --- Capture metadata ---
   captureMetadata: CaptureMetadata;
 
+  /**
+   * Optional free-text note for this individual frame (e.g. subject, location,
+   * "double exposure"). Added additively for the per-frame metadata feature;
+   * shown/edited in the gallery detail view and included in sidecar exports.
+   */
+  frameNote?: string;
+
   // --- Derived flags ---
   /** Whether the processing pipeline has run and produced a processedUri. */
   isProcessed: boolean;
@@ -261,7 +268,7 @@ export interface ProcessParamsSnapshot {
   /** Contrast −1.0…+1.0. */
   contrast: number;
   /** Film mode. */
-  mode: 'color' | 'bw';
+  mode: 'color' | 'bw' | 'slide';
   /** Whether orange-mask removal was applied. */
   removeOrangeMask: boolean;
   /** Sharpening 0.0…1.0. */
@@ -320,8 +327,25 @@ export interface ScanSession {
   // --- Film metadata ---
   filmType?: FilmType;
   filmBrand?: string;
-  /** ISO speed, e.g. 400. */
+  /** ISO speed (box speed), e.g. 400. */
   filmSpeed?: number;
+
+  // --- Extended roll metadata (added additively for roll-organization) ---
+  /**
+   * Exposure index the roll was actually shot/rated at, when it differs from
+   * the box speed (e.g. push/pull processing — box 400 shot at EI 800).
+   * Undefined ⇒ shot at box speed.
+   */
+  exposureIndex?: number;
+  /** Camera body used for the roll, e.g. "Nikon FM2". */
+  camera?: string;
+  /** Lens used for the roll, e.g. "50mm f/1.8". */
+  lens?: string;
+  /**
+   * Date the roll was shot (ISO-8601). Distinct from `createdAt`, which is
+   * when the roll was scanned into the app.
+   */
+  shotDate?: string;
 
   // --- State ---
   sessionState: SessionState;
@@ -356,4 +380,94 @@ export interface SessionStats {
   activeSessions: number;
   completedSessions: number;
   archivedSessions: number;
+}
+
+// ---------------------------------------------------------------------------
+// Metadata sidecar (export) — JSON/CSV companion files written next to exports
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema version for the JSON sidecar so future readers can migrate.
+ * Bump when the sidecar shape changes in a breaking way.
+ */
+export const METADATA_SIDECAR_VERSION = 1 as const;
+
+/**
+ * Per-frame metadata block written into a sidecar.
+ *
+ * This is a flattened, export-friendly projection of `ScannedImage` (the
+ * fields a photographer / cataloguing tool cares about) — NOT the full
+ * persistence model. Kept JSON-serialisable and stable.
+ */
+export interface FrameMetadataSidecar {
+  /** ScannedImage UUID. */
+  id: string;
+  /** 1-based position of the frame within the roll, if known. */
+  frameNumber?: number;
+  /** ISO-8601 capture/scan timestamp. */
+  createdAt: string;
+  /** Free-text per-frame note. */
+  note?: string;
+  /** Exposure time in seconds (e.g. 0.004 for 1/250). */
+  exposureTime?: number;
+  /** ISO sensitivity recorded at capture. */
+  iso?: number;
+  /** Focal length in mm. */
+  focalLength?: number;
+  /** Aperture (f-number). */
+  aperture?: number;
+  /** Original capture format (heic/jpeg/raw/png). */
+  format: ImageFormat;
+  /** Whether the processed positive has been rendered. */
+  isProcessed: boolean;
+  /** Whether the capture was RAW/DNG. */
+  isRaw: boolean;
+}
+
+/**
+ * Roll-level metadata block written into a sidecar — a projection of the
+ * `ScanSession` film-metadata fields.
+ */
+export interface RollMetadataSidecar {
+  /** ScanSession UUID. */
+  id: string;
+  /** Roll name. */
+  name: string;
+  /** Optional roll notes. */
+  notes?: string;
+  filmType?: FilmType;
+  /** Film brand / stock, e.g. "Kodak Portra". */
+  filmBrand?: string;
+  /** Box speed (ISO). */
+  filmSpeed?: number;
+  /** Shot exposure index, when different from box speed. */
+  exposureIndex?: number;
+  camera?: string;
+  lens?: string;
+  /** ISO-8601 date the roll was shot. */
+  shotDate?: string;
+  /** ISO-8601 date the roll was created (scanned) in-app. */
+  createdAt: string;
+  /** Number of frames in the roll. */
+  frameCount: number;
+}
+
+/**
+ * Top-level JSON sidecar document. Written either:
+ *   • per-frame  → a single `frame` alongside one exported image, or
+ *   • per-roll   → the `roll` plus every `frames[]` entry (roll manifest).
+ */
+export interface MetadataSidecar {
+  /** Schema version (METADATA_SIDECAR_VERSION). */
+  schemaVersion: typeof METADATA_SIDECAR_VERSION;
+  /** App + sidecar generator identifier. */
+  generator: string;
+  /** ISO-8601 timestamp the sidecar was generated. */
+  generatedAt: string;
+  /** Roll-level metadata (present for roll manifests). */
+  roll?: RollMetadataSidecar;
+  /** Single-frame metadata (present for per-image sidecars). */
+  frame?: FrameMetadataSidecar;
+  /** All frames in the roll (present for roll manifests). */
+  frames?: FrameMetadataSidecar[];
 }
