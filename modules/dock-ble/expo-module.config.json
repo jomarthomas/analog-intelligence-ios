@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["DockBleModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.dockble.DockBleModule"]
+  }
+}

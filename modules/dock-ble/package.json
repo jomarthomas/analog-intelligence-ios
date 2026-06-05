@@ -1,0 +1,10 @@
+{
+  "name": "dock-ble",
+  "version": "0.1.0",
+  "description": "Phase-3 BLE dock integration for Analog Intelligence — roll-scan state machine, interfaces, and simulation mode (local Expo module).",
+  "main": "index.ts",
+  "private": true,
+  "license": "MIT",
+  "author": "Analog Intelligence",
+  "homepage": "https://github.com/analog-intelligence/analog-intelligence-ios"
+}

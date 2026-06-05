@@ -1,0 +1,26 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.dockble'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.dockble"
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+// The BLE skeleton uses only Android framework Bluetooth APIs (BluetoothAdapter,
+// BluetoothLeScanner, BluetoothGatt — all in android.bluetooth.*).
+// No third-party BLE dependencies are required for the current stubs.
+//
+// BLE PLUG-IN: If react-native-ble-plx is adopted instead of native Android BLE,
+//   add the dependency here:
+//     implementation 'com.polidea.rxandroidble2:rxandroidble:1.x.y'
+//   Or for the official Kotlin BLE library (no-dependency approach):
+//   android.bluetooth.le.BluetoothLeScanner is available from SDK 21+.
+dependencies {}
