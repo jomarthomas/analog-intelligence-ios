@@ -285,6 +285,8 @@ export interface ProcessParamsSnapshot {
   // Crop & rotation (TS-layer only, not forwarded to native pipeline)
   cropRect?: CropRect;
   rotationDegrees?: number;
+  /** Native film-colour LUT id (e.g. 'frontier'); persisted so re-adjust keeps the look. */
+  lut?: string;
 }
 
 /** Default (identity) process params for a new colour-negative frame. */

@@ -344,11 +344,80 @@ public class AiImageProcessingModule: Module {
   ///   3. Mirror the same resolution + sampling on Android (see its applyLut).
   /// Until then, callers may set `lut` freely with no visual effect.
   private func applyLut(image: CIImage, lut: String) -> CIImage {
-    let id = lut.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !id.isEmpty else { return image }
-    // No bundled LUTs are registered yet and no .cube parser exists, so every
-    // value is "unknown" → identity. (Real lookup/sampling is TODO(lut) above.)
-    return image
+    let id = lut.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !id.isEmpty, let look = self.filmLook(for: id) else { return image }
+    // Generate a 17³ colour cube from the look and apply it with CIColorCube,
+    // which slots in exactly here (linear working space, post-tone, pre-encode).
+    let dim = 17
+    let data = self.generateCubeData(dimension: dim, look: look)
+    guard let filter = CIFilter(name: "CIColorCube") else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
+    filter.setValue(dim, forKey: "inputCubeDimension")
+    filter.setValue(data, forKey: "inputCubeData")
+    return filter.outputImage ?? image
+  }
+
+  /// A parametric film "look": COLOUR grading applied as a 3D LUT (the
+  /// cross-channel science sliders can't express). Tone stays with the pipeline
+  /// curve; this shapes colour only — saturation + luma-weighted split-tone.
+  private struct FilmLook {
+    let saturation: Float
+    let shadowR: Float; let shadowG: Float; let shadowB: Float
+    let highR: Float; let highG: Float; let highB: Float
+  }
+
+  /// Look table. MUST stay in sync with Android's `filmLook` for parity.
+  private func filmLook(for id: String) -> FilmLook? {
+    switch id {
+    case "portra", "portra400":
+      return FilmLook(saturation: 0.94, shadowR: 0.010, shadowG: 0.004, shadowB: -0.010, highR: 0.022, highG: 0.006, highB: -0.020)
+    case "frontier":
+      return FilmLook(saturation: 1.08, shadowR: -0.012, shadowG: 0.000, shadowB: 0.028, highR: 0.020, highG: 0.006, highB: -0.018)
+    case "noritsu":
+      return FilmLook(saturation: 1.04, shadowR: 0.000, shadowG: 0.000, shadowB: 0.010, highR: 0.012, highG: 0.004, highB: -0.010)
+    case "gold", "gold200":
+      return FilmLook(saturation: 1.05, shadowR: 0.018, shadowG: 0.004, shadowB: -0.018, highR: 0.030, highG: 0.014, highB: -0.030)
+    case "ektar", "ektar100":
+      return FilmLook(saturation: 1.16, shadowR: -0.008, shadowG: 0.000, shadowB: 0.012, highR: 0.010, highG: 0.000, highB: -0.012)
+    default:
+      return nil
+    }
+  }
+
+  /// Build CIColorCube data: N·N·N RGBA Float32, red fastest-varying, each grid
+  /// point passed through the look transform. Mirrors Android's cube generation.
+  private func generateCubeData(dimension dim: Int, look: FilmLook) -> Data {
+    var cube = [Float](repeating: 0, count: dim * dim * dim * 4)
+    let denom = Float(dim - 1)
+    var o = 0
+    for bi in 0..<dim {
+      let b = Float(bi) / denom
+      for gi in 0..<dim {
+        let g = Float(gi) / denom
+        for ri in 0..<dim {
+          let r = Float(ri) / denom
+          let out = applyFilmLook(r: r, g: g, b: b, look: look)
+          cube[o] = out.0; cube[o + 1] = out.1; cube[o + 2] = out.2; cube[o + 3] = 1.0
+          o += 4
+        }
+      }
+    }
+    return cube.withUnsafeBufferPointer { Data(buffer: $0) }
+  }
+
+  /// Shared per-colour film-look transform (saturation + luma-weighted
+  /// split-tone), clamped to [0,1]. MUST match Android's `applyFilmLook`.
+  private func applyFilmLook(r: Float, g: Float, b: Float, look: FilmLook) -> (Float, Float, Float) {
+    let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    var nr = lum + (r - lum) * look.saturation
+    var ng = lum + (g - lum) * look.saturation
+    var nb = lum + (b - lum) * look.saturation
+    let sw = (1 - lum) * (1 - lum)
+    let hw = lum * lum
+    nr += look.shadowR * sw + look.highR * hw
+    ng += look.shadowG * sw + look.highG * hw
+    nb += look.shadowB * sw + look.highB * hw
+    return (min(max(nr, 0), 1), min(max(ng, 0), 1), min(max(nb, 0), 1))
   }
 
   // MARK: Step 0 — optional reduced-resolution scaling (maxDimension)

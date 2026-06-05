@@ -114,6 +114,12 @@ export interface FullProcessParams {
    */
   maxDimension?: number;
 
+  /**
+   * Optional native film-colour LUT id (e.g. 'frontier', 'portra'). Applied by
+   * the engine's `applyLut` stage after the tone curve. Empty/unknown = no-op.
+   */
+  lut?: string;
+
   // ----- TS-layer-only fields (NOT forwarded to native pipeline) -----
 
   /**
@@ -152,6 +158,7 @@ export function toNativeParams(p: FullProcessParams): ProcessParams {
     aiColor: p.aiColor,
     aiDustRemoval: p.aiDustRemoval,
     maxDimension: p.maxDimension,
+    lut: p.lut,
   };
 }
 
@@ -175,6 +182,7 @@ export function toSnapshot(p: FullProcessParams): ProcessParamsSnapshot {
     aiDustRemoval: p.aiDustRemoval ?? false,
     cropRect: p.cropRect,
     rotationDegrees: p.rotationDegrees,
+    lut: p.lut,
   };
 }
 
@@ -202,6 +210,7 @@ export function fromSnapshot(
     aiDustRemoval: snapshot.aiDustRemoval,
     cropRect: snapshot.cropRect,
     rotationDegrees: snapshot.rotationDegrees,
+    lut: snapshot.lut,
   };
 }
 
