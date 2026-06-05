@@ -26,6 +26,15 @@ export {
   clampParam,
 } from './defaults';
 
+// Film-stock / lab-scanner looks
+export {
+  FILM_PROFILES,
+  NEUTRAL_PROFILE_ID,
+  getFilmProfile,
+  applyFilmProfile,
+} from './filmProfiles';
+export type { FilmProfile, FilmProfileGroup, ProfileParams } from './filmProfiles';
+
 // Pipeline orchestration (non-React)
 export { runPipeline, previewParams, isPipelineFallback } from './pipeline';
 

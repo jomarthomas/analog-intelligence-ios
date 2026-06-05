@@ -15,7 +15,9 @@ import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'react-native';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import { initPurchases } from '@/monetization';
+import { ErrorBoundary } from '@/components/error-boundary';
+import { initTelemetry } from '@/lib/telemetry';
+import { initAds, initPurchases } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
 
 /**
@@ -36,11 +38,14 @@ export default function RootLayout() {
   // Both are safe to call when their native modules are unconfigured — they
   // log a warning and resolve gracefully (see purchases.ts / galleryStore.ts).
   useEffect(() => {
+    initTelemetry();
     void initPurchases();
+    void initAds();
     void useGalleryStore.getState().loadGallery();
   }, []);
 
   return (
+    <ErrorBoundary>
     <ThemeProvider value={navTheme}>
       {/* Splash fade-out overlay */}
       <AnimatedSplashOverlay />
@@ -72,5 +77,6 @@ export default function RootLayout() {
 
       <StatusBar style="light" />
     </ThemeProvider>
+    </ErrorBoundary>
   );
 }

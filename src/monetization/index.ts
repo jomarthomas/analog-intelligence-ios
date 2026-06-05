@@ -46,6 +46,9 @@ export {
 } from './purchases';
 export type { PurchaseResult, RestoreResult } from './purchases';
 
+// Ads bootstrap
+export { initAds } from './ads';
+
 // React hook
 export { useProStatus, getProStatusSync } from './useProStatus';
 export type { ProStatusState } from './useProStatus';

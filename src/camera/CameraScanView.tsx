@@ -118,9 +118,17 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
   const toggleTorch = useCaptureStore((s) => s.toggleTorch);
   const setCaptureFormat = useCaptureStore((s) => s.setCaptureFormat);
 
-  // Resolve effective format, downgrading DNG when RAW isn't supported.
-  const effectiveFormat: CaptureFormat =
+  // Some devices/emulators can't encode the HEIC photo container. Once the
+  // camera reports that, we downgrade to JPEG for the rest of the session
+  // instead of letting the unsupported-format error reach the user. Real
+  // devices support HEIC, so this normally stays false.
+  const [heicUnsupported, setHeicUnsupported] = useState(false);
+
+  // Resolve effective format: downgrade DNG when RAW isn't supported, and HEIC
+  // when this device has reported it can't encode the HEIC container.
+  let effectiveFormat: CaptureFormat =
     captureFormat === 'dng' && !capabilities.supportsRawCapture ? 'heic' : captureFormat;
+  if (effectiveFormat === 'heic' && heicUnsupported) effectiveFormat = 'jpeg';
 
   // Outputs: live preview + still photo. The photo output's container format is
   // driven by the selected capture format — VisionCamera v5 sets the container
@@ -206,6 +214,24 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
     setIsCapturing,
   ]);
 
+  // Camera/session errors. An unsupported-HEIC-container error is recovered by
+  // downgrading to JPEG (re-creating the output) rather than surfaced to the
+  // user; everything else propagates to the caller.
+  const handleCameraError = useCallback(
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/heic/i.test(msg) && /not supported|unsupported|containerformat/i.test(msg)) {
+        if (!heicUnsupported) setHeicUnsupported(true);
+        if (__DEV__) {
+          console.warn('[CameraScanView] HEIC container unsupported — falling back to JPEG.');
+        }
+        return;
+      }
+      onError?.(err);
+    },
+    [heicUnsupported, onError],
+  );
+
   if (device == null) {
     return <PermissionGate variant="noDevice" />;
   }
@@ -223,7 +249,7 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           torchMode={torchEnabled ? 'on' : 'off'}
           resizeMode="cover"
           onStarted={handleStarted}
-          onError={onError}
+          onError={handleCameraError}
         />
       </Pressable>
 

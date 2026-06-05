@@ -19,11 +19,16 @@
  * - `bw`    → black & white negative path (legacy `FilmType.blackAndWhite`):
  *   invert → (orange-mask step skipped) → normalize → tone curve, then the
  *   final image is desaturated so colour casts from the source are removed.
- *
- * Slide / E-6 (legacy `FilmType.slide`) is intentionally omitted from the
- * cross-platform contract for the MVP; it can be added additively later.
+ * - `slide` → E-6 / reversal positive path (legacy `FilmType.slide`). The
+ *   source is ALREADY a positive, so the pipeline SKIPS inversion AND
+ *   orange-mask removal, and replaces the negative-oriented gray-world +
+ *   aggressive auto-tone-curve stages with a single gentle normalization.
+ *   The flow is: linearize → (no invert, no mask) → gentle normalize → user
+ *   adjustments → sharpen → encode. `removeOrangeMask` is ignored when
+ *   `mode === 'slide'`. Implemented identically on iOS (Core Image) and
+ *   Android (per-pixel). `color` / `bw` behaviour is unchanged.
  */
-export type FilmMode = 'color' | 'bw';
+export type FilmMode = 'color' | 'bw' | 'slide';
 
 /**
  * User-facing processing parameters.
@@ -55,12 +60,13 @@ export interface ProcessParams {
    */
   contrast: number;
 
-  /** Film mode — see {@link FilmMode}. */
+  /** Film mode — see {@link FilmMode}. Accepts `color`, `bw`, or `slide`. */
   mode: FilmMode;
 
   /**
    * When true (and `mode === 'color'`) run the orange-mask estimation +
-   * removal stage (legacy `OrangeMaskEstimator`). Ignored for `bw`.
+   * removal stage (legacy `OrangeMaskEstimator`). Ignored for `bw` and for
+   * `slide` (a slide is already a positive with no orange mask).
    */
   removeOrangeMask: boolean;
 
@@ -82,6 +88,25 @@ export interface ProcessParams {
    * native. Defaults to false when omitted.
    */
   aiDustRemoval?: boolean;
+
+  /**
+   * Optional cap on the longer edge (in pixels) of the image the engine
+   * processes. When set and the source's longer edge exceeds it, the source is
+   * downscaled (aspect-preserving) BEFORE the heavy per-pixel passes.
+   *
+   * This is the **live-preview fast path**: the JS layer can pass a small value
+   * (e.g. 1024–2048) to make `processNegative` run an order of magnitude
+   * cheaper and avoid out-of-memory on large captures, then re-run at full
+   * resolution (omit this field) when committing the final render.
+   *
+   * - **Android** allocates three full-resolution `FloatArray`s, so a big
+   *   capture is a real OOM risk; downscaling here removes it.
+   * - **iOS** Core Image is GPU-tiled, so it honours this with a Lanczos scale
+   *   when set; omitting it is always safe.
+   *
+   * Omitted/0/negative ⇒ full-resolution processing (unchanged default).
+   */
+  maxDimension?: number;
 
   // --- Additive, optional fine adjustments (faithful to legacy sliders) ---
   // These are OPTIONAL extensions to the core contract. They default to 0 and

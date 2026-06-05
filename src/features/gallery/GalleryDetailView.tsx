@@ -17,6 +17,7 @@ import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -31,6 +32,8 @@ import { WatermarkOverlay } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
 
 import { exportImage } from './exportImage';
+import { exportFrameSidecar } from './metadataSidecar';
+import { FrameMetadataPanel } from './FrameMetadataPanel';
 
 export type GalleryDetailViewProps = {
   imageId: string;
@@ -45,9 +48,22 @@ export function GalleryDetailView({ imageId, onReadjust, onBack }: GalleryDetail
   const { height: windowHeight } = useWindowDimensions();
 
   const image = useGalleryStore((s) => s.allImages.find((i) => i.id === imageId));
+  const session = useGalleryStore((s) =>
+    image ? s.allSessions.find((x) => x.id === image.sessionId) : undefined,
+  );
   const deleteImage = useGalleryStore((s) => s.deleteImage);
+  const refreshSession = useGalleryStore((s) => s.refreshSession);
 
   const [isExporting, setIsExporting] = useState(false);
+
+  // 1-based position of this frame within its roll (for sidecar frameNumber).
+  const frameNumber =
+    session && image
+      ? (() => {
+          const idx = session.imageIds.indexOf(image.id);
+          return idx >= 0 ? idx + 1 : undefined;
+        })()
+      : undefined;
 
   // WatermarkOverlay wraps children in a position:relative box (no flex), so
   // the image area needs an explicit height to fill the screen rather than
@@ -74,13 +90,27 @@ export function GalleryDetailView({ imageId, onReadjust, onBack }: GalleryDetail
     [image],
   );
 
+  const runSidecarExport = useCallback(async () => {
+    if (image === undefined) return;
+    setIsExporting(true);
+    try {
+      const result = await exportFrameSidecar(image, session, frameNumber);
+      if (!result.ok) {
+        Alert.alert('Metadata export failed', result.message);
+      }
+    } finally {
+      setIsExporting(false);
+    }
+  }, [image, session, frameNumber]);
+
   const handleExport = useCallback(() => {
     Alert.alert('Export', 'Choose where to send this scan.', [
       { text: 'Save to Photos', onPress: () => void runExport('photos') },
       { text: 'Share…', onPress: () => void runExport('share') },
+      { text: 'Metadata sidecar (JSON)', onPress: () => void runSidecarExport() },
       { text: 'Cancel', style: 'cancel' },
     ]);
-  }, [runExport]);
+  }, [runExport, runSidecarExport]);
 
   const handleDelete = useCallback(() => {
     Alert.alert('Delete scan?', 'This permanently removes the frame and its files.', [
@@ -131,27 +161,40 @@ export function GalleryDetailView({ imageId, onReadjust, onBack }: GalleryDetail
         )}
       </View>
 
-      {/* Status line */}
-      <Text style={[styles.status, { color: theme.textSecondary }]}>
-        {image.isProcessed ? 'Processed' : 'Not yet processed'}
-        {image.isRaw ? ' · RAW' : ''}
-      </Text>
+      <ScrollView
+        style={styles.bodyScroll}
+        contentContainerStyle={styles.bodyContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled">
+        {/* Status line */}
+        <Text style={[styles.status, { color: theme.textSecondary }]}>
+          {image.isProcessed ? 'Processed' : 'Not yet processed'}
+          {image.isRaw ? ' · RAW' : ''}
+          {frameNumber !== undefined ? ` · Frame ${frameNumber}` : ''}
+        </Text>
 
-      {/* Actions */}
-      <View style={styles.actions}>
-        <Button variant="secondary" onPress={() => onReadjust(imageId)} style={styles.actionButton}>
-          {image.isProcessed ? 'Re-adjust' : 'Adjust'}
-        </Button>
-        <Button onPress={handleExport} style={styles.actionButton}>
-          Export
-        </Button>
-      </View>
+        {/* Actions */}
+        <View style={styles.actions}>
+          <Button variant="secondary" onPress={() => onReadjust(imageId)} style={styles.actionButton}>
+            {image.isProcessed ? 'Re-adjust' : 'Adjust'}
+          </Button>
+          <Button onPress={handleExport} style={styles.actionButton}>
+            Export
+          </Button>
+        </View>
 
-      <View style={styles.deleteRow}>
-        <Button variant="ghost" size="sm" onPress={handleDelete}>
-          <Text style={{ color: Palette.danger, fontWeight: FontWeight.semibold }}>Delete scan</Text>
-        </Button>
-      </View>
+        {/* Per-frame capture metadata + editable note */}
+        <FrameMetadataPanel
+          image={image}
+          onNoteSaved={() => void refreshSession(image.sessionId)}
+        />
+
+        <View style={styles.deleteRow}>
+          <Button variant="ghost" size="sm" onPress={handleDelete}>
+            <Text style={{ color: Palette.danger, fontWeight: FontWeight.semibold }}>Delete scan</Text>
+          </Button>
+        </View>
+      </ScrollView>
     </View>
   );
 }
@@ -180,6 +223,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  bodyScroll: {
+    flex: 1,
+  },
+  bodyContent: {
+    gap: Spacing.md,
+    paddingBottom: Spacing.lg,
   },
   status: {
     fontSize: FontSize.sm,

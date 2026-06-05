@@ -29,7 +29,7 @@ const DB_NAME = 'analog_intelligence.db';
  * Current schema version. Bump this when adding a new migration to
  * MIGRATIONS below.
  */
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Migrations
@@ -93,6 +93,19 @@ const MIGRATIONS: string[] = [
 
   CREATE INDEX IF NOT EXISTS idx_images_created_at
     ON images (created_at DESC);
+  `,
+
+  // --- v2: extended roll + per-frame metadata (roll-organization feature) ---
+  // Additive columns only; all nullable so existing rows remain valid.
+  // (SQLite has no IF NOT EXISTS for ADD COLUMN, but each migration runs once
+  //  guarded by schema_version, so these execute exactly once.)
+  `
+  ALTER TABLE sessions ADD COLUMN exposure_index INTEGER;
+  ALTER TABLE sessions ADD COLUMN camera         TEXT;
+  ALTER TABLE sessions ADD COLUMN lens           TEXT;
+  ALTER TABLE sessions ADD COLUMN shot_date      TEXT;
+
+  ALTER TABLE images   ADD COLUMN frame_note     TEXT;
   `,
 ];
 
@@ -183,6 +196,11 @@ export interface SessionRow {
   film_type: string | null;
   film_brand: string | null;
   film_speed: number | null;
+  // Added in schema v2 (nullable on legacy rows).
+  exposure_index: number | null;
+  camera: string | null;
+  lens: string | null;
+  shot_date: string | null;
   session_state: string;
   image_ids: string; // JSON-encoded string[]
 }
@@ -206,4 +224,6 @@ export interface ImageRow {
   process_params: string | null; // JSON
   exposure_metrics: string | null; // JSON
   export_history: string; // JSON
+  // Added in schema v2 (nullable on legacy rows).
+  frame_note: string | null;
 }

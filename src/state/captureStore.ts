@@ -86,6 +86,14 @@ export interface CaptureState {
   // --- Transient capture status ---
   isCapturing: boolean;
 
+  // --- Batch capture mode ---
+  /**
+   * When true, each capture is saved into the current roll WITHOUT navigating to
+   * the Adjust screen — so a whole roll can be shot quickly and reviewed/edited
+   * later. The #1 workflow request for mobile film scanners.
+   */
+  batchMode: boolean;
+
   // --- Actions ---
   setCaptureFormat: (format: CaptureFormat) => void;
   cycleFlashMode: () => void;
@@ -108,6 +116,9 @@ export interface CaptureState {
   setPeakingColor: (color: PeakingColor) => void;
 
   setIsCapturing: (capturing: boolean) => void;
+
+  toggleBatchMode: () => void;
+  setBatchMode: (on: boolean) => void;
 
   /** Reset transient state (e.g. when leaving the scan screen). */
   reset: () => void;
@@ -159,6 +170,7 @@ export const useCaptureStore = create<CaptureState>((set, get) => ({
   peakingColor: 'red',
 
   isCapturing: false,
+  batchMode: false,
 
   // -----------------------------------------------------------------------
   setCaptureFormat: (format) => set({ captureFormat: format }),
@@ -212,6 +224,9 @@ export const useCaptureStore = create<CaptureState>((set, get) => ({
   setPeakingColor: (color) => set({ peakingColor: color }),
 
   setIsCapturing: (capturing) => set({ isCapturing: capturing }),
+
+  toggleBatchMode: () => set((s) => ({ batchMode: !s.batchMode })),
+  setBatchMode: (on) => set({ batchMode: on }),
 
   reset: () =>
     set({

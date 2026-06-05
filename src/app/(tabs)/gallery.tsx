@@ -14,6 +14,7 @@
  * already up to date when the user returns here.
  */
 
+import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 
@@ -22,11 +23,16 @@ import { FontSize, FontWeight, Spacing } from '@/constants/theme';
 import { Screen } from '@/theme/screen';
 import { BannerAd } from '@/monetization';
 import { useGalleryStore } from '@/state/galleryStore';
+import type { GallerySortOrder } from '@/storage';
 import {
   ContactSheetButton,
   GalleryEmptyState,
   GalleryGrid,
+  GalleryRollSectionList,
+  GallerySortControl,
+  getInitialSortOrder,
   MultiSelectToolbar,
+  RollMetadataSheet,
 } from '@/features/gallery';
 
 export default function GalleryScreen() {
@@ -36,6 +42,16 @@ export default function GalleryScreen() {
   const hasImages = useGalleryStore((s) => s.displayedImages.length > 0);
   const inSelectionMode = useGalleryStore((s) => s.selectedIds.size > 0);
 
+  // Sort/view order, seeded from the persisted preference. `'sessionGrouped'`
+  // switches the flat grid for the grouped-by-roll SectionList.
+  const [sortOrder, setSortOrder] = useState<GallerySortOrder>(getInitialSortOrder);
+  const grouped = sortOrder === 'sessionGrouped';
+
+  // Roll being edited in the metadata sheet (null = closed).
+  const [editingRollId, setEditingRollId] = useState<string | null>(null);
+
+  const openImage = (id: string) => router.push(`/gallery/${id}`);
+
   return (
     <Screen edges={['top', 'left', 'right']}>
       {/* Header */}
@@ -44,9 +60,22 @@ export default function GalleryScreen() {
         {hasImages && <ContactSheetButton />}
       </View>
 
+      {hasImages && !inSelectionMode && (
+        <View style={styles.controls}>
+          <GallerySortControl value={sortOrder} onChange={setSortOrder} />
+        </View>
+      )}
+
       {hasImages ? (
         <View style={styles.flex}>
-          <GalleryGrid onOpenImage={(id) => router.push(`/gallery/${id}`)} />
+          {grouped ? (
+            <GalleryRollSectionList
+              onOpenImage={openImage}
+              onEditRoll={setEditingRollId}
+            />
+          ) : (
+            <GalleryGrid onOpenImage={openImage} />
+          )}
         </View>
       ) : (
         <GalleryEmptyState onScan={() => router.replace('/(tabs)/scan')} />
@@ -54,6 +83,9 @@ export default function GalleryScreen() {
 
       {/* Multi-select toolbar replaces the ad while selecting. */}
       {inSelectionMode ? <MultiSelectToolbar /> : <BannerAd />}
+
+      {/* Roll metadata editor (mounted modal; visibility driven by editingRollId). */}
+      <RollMetadataSheet sessionId={editingRollId} onClose={() => setEditingRollId(null)} />
     </Screen>
   );
 }
@@ -61,6 +93,12 @@ export default function GalleryScreen() {
 const styles = StyleSheet.create({
   flex: {
     flex: 1,
+  },
+  controls: {
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.sm,
   },
   header: {
     flexDirection: 'row',

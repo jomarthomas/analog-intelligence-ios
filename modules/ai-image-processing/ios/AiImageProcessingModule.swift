@@ -54,11 +54,15 @@ internal struct ProcessParams: Record {
   @Field var exposure: Double = 0
   @Field var warmth: Double = 0
   @Field var contrast: Double = 0
-  @Field var mode: String = "color"          // "color" | "bw"
+  @Field var mode: String = "color"          // "color" | "bw" | "slide"
   @Field var removeOrangeMask: Bool = true
   @Field var sharpen: Double = 0
   @Field var aiColor: Bool = false
   @Field var aiDustRemoval: Bool = false
+  // Optional reduced-resolution cap (longer-edge px). <= 0 ⇒ full resolution.
+  // Live-preview fast path: Core Image is GPU-tiled so we honour this with a
+  // Lanczos scale at pipeline entry. See AiImageProcessing.types.ts.
+  @Field var maxDimension: Double = 0
   @Field var saturation: Double = 0
   @Field var highlights: Double = 0
   @Field var shadows: Double = 0
@@ -198,40 +202,69 @@ public class AiImageProcessingModule: Module {
   // MARK: - Pipeline (ImageProcessor.processNegative, steps 2–8)
 
   private func runPipeline(input: CIImage, params: ProcessParams) throws -> CIImage {
-    let isColor = params.mode != "bw"
+    // "slide" is an already-POSITIVE E-6 source; "bw" and "color" are negatives.
+    let isSlide = params.mode == "slide"
+    let isColor = params.mode == "color"          // bw and slide are not "color"
     var image = input
+
+    // Step 0 — optional reduced-resolution fast path (live preview / OOM guard).
+    // Core Image is GPU-tiled, so a Lanczos downscale here is cheap and keeps
+    // every subsequent auto-stage (mask sampling, gray-world, tone CDF) working
+    // on the same smaller image — which is exactly the preview semantics we want.
+    image = applyMaxDimension(image, maxDimension: params.maxDimension)
 
     // Step 2 — Convert to linear RGB.
     // ImageProcessor.convertToLinearRGB uses CILinearToSRGBToneCurve.
     image = linearize(image)
 
-    // Step 3 — Invert negative.
-    // NegativeInverter.invertColorNegative / invertBlackAndWhite → CIColorInvert.
-    image = invert(image)
+    if isSlide {
+      // --- Slide / E-6 positive path ---------------------------------------
+      // The source is already a positive: SKIP inversion AND orange-mask
+      // removal, and SKIP the negative-oriented gray-world + auto-tone-curve
+      // (those assume an inverted negative and would crush a correctly-exposed
+      // slide). Instead apply one gentle black/white-point normalization, then
+      // the user adjustments and sharpen. (legacy FilmType.slide intent.)
+      image = normalizeSlide(image: image)
+    } else {
+      // --- Colour / B&W negative path (unchanged) --------------------------
+      // Capture the linearized (and, if requested, downscaled) PRE-invert image
+      // so the film-base sampler reads the same pixels the inversion consumes —
+      // the brightest orange max-density base lives here.
+      let preInvert = image
 
-    // Step 4 — Estimate + remove orange mask (colour negatives only).
-    // OrangeMaskEstimator.removeOrangeMask.
-    if isColor && params.removeOrangeMask {
-      let mask = estimateOrangeMask(image: image)
-      image = removeOrangeMask(image: image, mask: mask)
+      // Step 3 — Invert negative.
+      // NegativeInverter.invertColorNegative / invertBlackAndWhite → CIColorInvert.
+      image = invert(image)
+
+      // Step 4 — Estimate + remove orange mask (colour negatives only).
+      // OrangeMaskEstimator.removeOrangeMask.
+      if isColor && params.removeOrangeMask {
+        // Film-base (rebate) sampling reads the PRE-INVERT image so the brightest
+        // orange max-density base is available; the post-invert `image` is the
+        // dark-region fallback source.
+        let mask = estimateOrangeMask(image: image, preInvert: preInvert)
+        image = removeOrangeMask(image: image, mask: mask)
+      }
+
+      // Step 5 — Normalize colour channels (gray-world).
+      // ColorCorrector.normalizeChannels.
+      image = normalizeChannels(image: image)
+
+      // Step 6 — Automatic tone correction (histogram CDF → levels + gamma).
+      // ColorCorrector.applyToneCorrection.
+      image = applyToneCorrection(image: image)
     }
-
-    // Step 5 — Normalize colour channels (gray-world).
-    // ColorCorrector.normalizeChannels.
-    image = normalizeChannels(image: image)
-
-    // Step 6 — Automatic tone correction (histogram CDF → levels + gamma).
-    // ColorCorrector.applyToneCorrection.
-    image = applyToneCorrection(image: image)
 
     // Step 7 — User adjustments (exposure/highlights+shadows/contrast/warmth/
     // saturation/vibrance), in the legacy order. UserAdjustments.applyAdjustments.
+    // Applied for ALL modes including slide.
     image = applyUserAdjustments(image: image, params: params)
 
     // B&W: collapse to luminance after tone/colour work so any residual cast
     // is removed (legacy treats B&W as colourless; the dedicated desaturate
     // here is the cross-platform-equivalent of selecting FilmType.blackAndWhite).
-    if !isColor {
+    // Slide is a colour positive, so it is NOT desaturated.
+    if params.mode == "bw" {
       image = desaturate(image)
     }
 
@@ -246,6 +279,87 @@ public class AiImageProcessingModule: Module {
     image = encodeForSRGB(image)
 
     return image
+  }
+
+  // MARK: Step 0 — optional reduced-resolution scaling (maxDimension)
+
+  /// Downscale `image` so its longer edge is at most `maxDimension` px, using
+  /// CILanczosScaleTransform (aspect-preserving). `maxDimension <= 0` or an
+  /// image already within the cap is returned unchanged. Core Image is
+  /// GPU-tiled, so this is the iOS analogue of the Android pre-pass bitmap
+  /// downscale and powers the live-preview fast path.
+  private func applyMaxDimension(_ image: CIImage, maxDimension: Double) -> CIImage {
+    guard maxDimension > 0 else { return image }
+    let extent = image.extent
+    let longer = max(extent.width, extent.height)
+    guard longer.isFinite, longer > CGFloat(maxDimension) else { return image }
+
+    let scale = CGFloat(maxDimension) / longer
+    let f = CIFilter(name: "CILanczosScaleTransform")!
+    f.setValue(image, forKey: kCIInputImageKey)
+    f.setValue(scale, forKey: kCIInputScaleKey)
+    f.setValue(1.0, forKey: kCIInputAspectRatioKey)
+    return f.outputImage ?? image
+  }
+
+  // MARK: Slide normalization (gentle positive black/white-point stretch)
+
+  /// Gentle normalization for an already-positive slide. Unlike the negative
+  /// `applyToneCorrection` (which applies an aggressive brightness=log2(1/range)
+  /// + contrast + gamma to recover an inverted negative), this only stretches
+  /// the 1%/99% luminance points to [0,1] with NO added contrast/gamma — a
+  /// correctly-exposed E-6 frame should be largely preserved. Operates on the
+  /// linear-light image; reads the histogram in sRGB-encoded bins to match the
+  /// CIAreaHistogram conventions used elsewhere.
+  private func normalizeSlide(image: CIImage) -> CIImage {
+    let extent = image.extent
+    let hist = CIFilter(name: "CIAreaHistogram")!
+    hist.setValue(image, forKey: kCIInputImageKey)
+    hist.setValue(CIVector(cgRect: extent), forKey: "inputExtent")
+    hist.setValue(256, forKey: "inputCount")
+    guard let histOut = hist.outputImage else { return image }
+
+    var data = [UInt8](repeating: 0, count: 256 * 4)
+    ciContext.render(
+      histOut,
+      toBitmap: &data,
+      rowBytes: 256 * 4,
+      bounds: histOut.extent,
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    var total: Float = 0
+    for bin in 0..<256 {
+      let r = Float(data[bin * 4]); let g = Float(data[bin * 4 + 1]); let b = Float(data[bin * 4 + 2])
+      total += 0.299 * r + 0.587 * g + 0.114 * b
+    }
+    var blackPoint: Float = 0
+    var whitePoint: Float = 1.0
+    var cumulative: Float = 0
+    let safeTotal = max(total, 1.0)
+    for bin in 0..<256 {
+      let r = Float(data[bin * 4]); let g = Float(data[bin * 4 + 1]); let b = Float(data[bin * 4 + 2])
+      cumulative += 0.299 * r + 0.587 * g + 0.114 * b
+      let cdf = cumulative / safeTotal
+      if cdf >= 0.01 && blackPoint == 0 { blackPoint = Float(bin) / 255.0 }
+      if cdf >= 0.99 { whitePoint = Float(bin) / 255.0; break }
+    }
+
+    // Map [blackPoint, whitePoint] → [0, 1] as a linear slope+bias (no gamma,
+    // no contrast boost). CIColorMatrix on RGB equally = a neutral level stretch.
+    let range = max(whitePoint - blackPoint, 0.05)
+    let slope = CGFloat(1.0 / range)
+    let biasVal = CGFloat(-Double(blackPoint) / Double(range))
+
+    let m = CIFilter(name: "CIColorMatrix")!
+    m.setValue(image, forKey: kCIInputImageKey)
+    m.setValue(CIVector(x: slope, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    m.setValue(CIVector(x: 0, y: slope, z: 0, w: 0), forKey: "inputGVector")
+    m.setValue(CIVector(x: 0, y: 0, z: slope, w: 0), forKey: "inputBVector")
+    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    m.setValue(CIVector(x: biasVal, y: biasVal, z: biasVal, w: 0), forKey: "inputBiasVector")
+    return m.outputImage ?? image
   }
 
   // MARK: Step 2 — linearize
@@ -280,10 +394,119 @@ public class AiImageProcessingModule: Module {
     static let `default` = OrangeMask(redDensity: 1.0, greenDensity: 0.65, blueDensity: 0.4, strength: 0.6)
   }
 
-  /// Port of OrangeMaskEstimator.estimateOrangeMask:
-  /// downsample to 10%, read pixels, collect dark pixels (luma < 0.2 by
-  /// BT.601), average up to 100 darkest, derive per-channel densities.
-  private func estimateOrangeMask(image: CIImage) -> OrangeMask {
+  /// Estimate the orange mask, preferring **film-base (rebate) sampling**.
+  ///
+  /// Pro film-scanning derives the mask from the unexposed film *base* — in a
+  /// colour NEGATIVE that is the BRIGHTEST, most-saturated-orange region (max
+  /// density base) of the image *before* inversion (high R, mid G, low B). This
+  /// is more reliable than sampling whatever is darkest after inversion, which
+  /// can be a deep shadow in the scene rather than the base.
+  ///
+  /// Strategy (deterministic):
+  ///   1. Sample the **pre-invert** linear image, find the brightest pixels that
+  ///      are clearly orange (R > G > B). Average up to the 100 brightest such
+  ///      pixels → the film-base colour, then convert to the post-invert density
+  ///      convention (`1 - base`) the downstream removal step already expects.
+  ///   2. If no clear orange base is found (e.g. B&W mis-tagged, or a borderless
+  ///      crop with no rebate), FALL BACK to the legacy method: sample the
+  ///      darkest pixels of the post-invert `image` (luma < 51/255), avg 100.
+  ///
+  /// The returned densities feed the unchanged `removeOrangeMask` (CIColorMatrix
+  /// gains + bias), so only the *source of the estimate* improves, not the math.
+  ///
+  /// - Parameters:
+  ///   - image:     the POST-invert linear image (used by the dark fallback).
+  ///   - preInvert: the PRE-invert linear image (used for film-base sampling).
+  private func estimateOrangeMask(image: CIImage, preInvert: CIImage) -> OrangeMask {
+    // 1) Preferred: film-base (rebate) sampling on the pre-invert image.
+    if let baseMask = estimateMaskFromFilmBase(preInvert: preInvert) {
+      return baseMask
+    }
+    // 2) Fallback: legacy darkest-region sampling on the post-invert image.
+    return estimateMaskFromDarkRegions(image: image)
+  }
+
+  /// Convert a sampled film-base colour into the post-invert density convention.
+  /// The legacy removal expects densities derived from the *inverted* base
+  /// (i.e. `1 - base`), normalized to red. We reproduce that exactly so the
+  /// CIColorMatrix step is identical to before — only the estimate is better.
+  private func densitiesFromBase(baseR: Float, baseG: Float, baseB: Float) -> OrangeMask {
+    // Post-invert equivalent of the base = 1 - base (clamped).
+    let r = max(0, min(1, 1 - baseR))
+    let g = max(0, min(1, 1 - baseG))
+    let b = max(0, min(1, 1 - baseB))
+    let safeR = max(r, 0.0001)
+    let range = max(r, g, b) - min(r, g, b)
+    return OrangeMask(
+      redDensity: 1.0,
+      greenDensity: g / safeR,
+      blueDensity: b / safeR,
+      strength: range > 0.1 ? min(1.0, range * 2.0) : 0.3
+    )
+  }
+
+  /// Sample the brightest, most-saturated-orange region of the PRE-invert image
+  /// (the film base). Returns nil if no convincing orange base is present so the
+  /// caller can fall back to the legacy dark-region method.
+  private func estimateMaskFromFilmBase(preInvert: CIImage) -> OrangeMask? {
+    let extent = preInvert.extent
+    guard extent.width > 0, extent.height > 0 else { return nil }
+
+    let scale: CGFloat = 0.1
+    let w = max(1, Int(extent.width * scale))
+    let h = max(1, Int(extent.height * scale))
+
+    let lanczos = CIFilter(name: "CILanczosScaleTransform")!
+    lanczos.setValue(preInvert, forKey: kCIInputImageKey)
+    lanczos.setValue(scale, forKey: kCIInputScaleKey)
+    lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
+    let small = lanczos.outputImage ?? preInvert
+
+    let bytesPerRow = w * 4
+    var pixels = [UInt8](repeating: 0, count: w * h * 4)
+    ciContext.render(
+      small,
+      toBitmap: &pixels,
+      rowBytes: bytesPerRow,
+      bounds: CGRect(x: 0, y: 0, width: w, height: h),
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    // Collect bright, orange-dominant candidates (the film base): R > G > B with
+    // a real orange spread, and high luminance (the base is the brightest part
+    // of a negative). Thresholds are deterministic and intentionally strict so
+    // a non-orange scene does NOT trigger this path (it falls back instead).
+    var base: [(r: Float, g: Float, b: Float, lum: Float)] = []
+    for i in 0..<(w * h) {
+      let o = i * 4
+      let r = Float(pixels[o]); let g = Float(pixels[o + 1]); let b = Float(pixels[o + 2])
+      let lum = 0.299 * r + 0.587 * g + 0.114 * b
+      // Orange ordering with margin, and bright enough to be the base.
+      let orange = (r > g + 10) && (g > b + 5)
+      if lum > 120 && orange {
+        base.append((r / 255, g / 255, b / 255, lum))
+      }
+    }
+
+    // Need a convincing amount of base to trust this estimate.
+    guard base.count >= 100 else { return nil }
+
+    // Average the 100 BRIGHTEST orange-base pixels (max-density base).
+    base.sort { $0.lum > $1.lum }
+    let samples = base.prefix(100)
+    let count = Float(samples.count)
+    let avgR = samples.map { $0.r }.reduce(0, +) / count
+    let avgG = samples.map { $0.g }.reduce(0, +) / count
+    let avgB = samples.map { $0.b }.reduce(0, +) / count
+
+    return densitiesFromBase(baseR: avgR, baseG: avgG, baseB: avgB)
+  }
+
+  /// Legacy fallback — port of OrangeMaskEstimator.estimateOrangeMask:
+  /// downsample to 10%, collect dark pixels (BT.601 luma < 51), average up to
+  /// the 100 darkest, derive per-channel densities normalized to red.
+  private func estimateMaskFromDarkRegions(image: CIImage) -> OrangeMask {
     let extent = image.extent
     guard extent.width > 0, extent.height > 0 else { return .default }
 
