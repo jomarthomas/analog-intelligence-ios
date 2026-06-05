@@ -29,7 +29,6 @@ import {
   FontSize,
   FontWeight,
   Palette,
-  Radius,
   Spacing,
 } from '@/constants/theme';
 import { Button } from '@/theme/button';
@@ -229,7 +228,7 @@ export function Paywall({ onClose }: PaywallProps) {
           <View style={styles.successSection}>
             <Text style={styles.successIcon}>✓</Text>
             <Text style={[styles.successTitle, { color: Palette.success }]}>
-              You're a Pro user!
+              You&apos;re a Pro user!
             </Text>
             <Text style={[styles.successSubtitle, { color: theme.textSecondary }]}>
               Thank you for your support.

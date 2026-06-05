@@ -42,39 +42,6 @@ function ContactSheetInner() {
   const displayedImages = useGalleryStore((s) => s.displayedImages);
   const [busy, setBusy] = useState(false);
 
-  const handlePress = useCallback(() => {
-    // Collect the best available URI for each image (thumbnail first for speed,
-    // then processedUri, then originalUri). Skip images with no URI at all.
-    const uris: string[] = displayedImages
-      .map((img) => img.thumbnailUri ?? img.processedUri ?? img.originalUri)
-      .filter((uri): uri is string => typeof uri === 'string');
-
-    if (uris.length === 0) {
-      Alert.alert('No images', 'There are no images to include in the contact sheet.');
-      return;
-    }
-
-    Alert.alert(
-      'Contact Sheet',
-      `Create a contact sheet from ${uris.length} frame${uris.length === 1 ? '' : 's'}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Save to Photos',
-          onPress: () => {
-            void handleGenerate(uris, 'photos');
-          },
-        },
-        {
-          text: 'Share',
-          onPress: () => {
-            void handleGenerate(uris, 'share');
-          },
-        },
-      ],
-    );
-  }, [displayedImages]);
-
   const handleGenerate = useCallback(
     async (uris: string[], destination: 'photos' | 'share') => {
       setBusy(true);
@@ -117,6 +84,39 @@ function ContactSheetInner() {
     },
     [],
   );
+
+  const handlePress = useCallback(() => {
+    // Collect the best available URI for each image (thumbnail first for speed,
+    // then processedUri, then originalUri). Skip images with no URI at all.
+    const uris: string[] = displayedImages
+      .map((img) => img.thumbnailUri ?? img.processedUri ?? img.originalUri)
+      .filter((uri): uri is string => typeof uri === 'string');
+
+    if (uris.length === 0) {
+      Alert.alert('No images', 'There are no images to include in the contact sheet.');
+      return;
+    }
+
+    Alert.alert(
+      'Contact Sheet',
+      `Create a contact sheet from ${uris.length} frame${uris.length === 1 ? '' : 's'}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Save to Photos',
+          onPress: () => {
+            void handleGenerate(uris, 'photos');
+          },
+        },
+        {
+          text: 'Share',
+          onPress: () => {
+            void handleGenerate(uris, 'share');
+          },
+        },
+      ],
+    );
+  }, [displayedImages, handleGenerate]);
 
   return (
     <Pressable

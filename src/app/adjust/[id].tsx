@@ -92,6 +92,9 @@ function useLiveHistogram(uri: string | undefined): {
 
   useEffect(() => {
     if (!uri) {
+      // Reset to the empty state when there's no preview yet. This is an
+      // input-driven reset for the debounced fetch below, not a render loop.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setHistogram(null);
       setIsLoading(false);
       return;

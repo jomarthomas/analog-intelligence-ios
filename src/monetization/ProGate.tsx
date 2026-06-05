@@ -26,7 +26,7 @@ import React, { ReactNode } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '@/hooks/use-theme';
-import { FontSize, FontWeight, Palette, Radius, Spacing } from '@/constants/theme';
+import { FontSize, FontWeight, Radius, Spacing } from '@/constants/theme';
 import { ProBadge } from '@/theme/pro-badge';
 import { Button } from '@/theme/button';
 

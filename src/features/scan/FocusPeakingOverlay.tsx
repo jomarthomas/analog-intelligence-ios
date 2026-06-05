@@ -26,7 +26,7 @@
  * Pointer events are fully transparent (box-none) so tap-to-focus works.
  */
 
-import { memo, useEffect, useRef, useCallback } from 'react';
+import { memo, useEffect, useState, useCallback } from 'react';
 import { StyleSheet, View, type ViewStyle } from 'react-native';
 import { Canvas, useCanvasRef, Rect, Group } from '@shopify/react-native-skia';
 
@@ -95,12 +95,9 @@ function FocusPeakingOverlayImpl({
   style,
 }: FocusPeakingOverlayProps) {
   const canvasRef = useCanvasRef();
-  const containerSizeRef = useRef({ width: 0, height: 0 });
-
-  // Keep latest cells in a ref so the draw callback sees the freshest data
-  // without a stale closure.
-  const cellsRef = useRef<PeakCell[]>(peakCells);
-  cellsRef.current = peakCells;
+  // Container size is held in state so the rectangles (which read it during
+  // render) recompute once the real layout arrives, and on every rotation.
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
 
   // Trigger a Skia redraw whenever peakCells reference changes.
   useEffect(() => {
@@ -109,10 +106,10 @@ function FocusPeakingOverlayImpl({
 
   const handleLayout = useCallback(
     (e: { nativeEvent: { layout: { width: number; height: number } } }) => {
-      containerSizeRef.current = {
-        width: e.nativeEvent.layout.width,
-        height: e.nativeEvent.layout.height,
-      };
+      const { width, height } = e.nativeEvent.layout;
+      setContainerSize((prev) =>
+        prev.width === width && prev.height === height ? prev : { width, height },
+      );
     },
     [],
   );
@@ -134,13 +131,10 @@ function FocusPeakingOverlayImpl({
         opaque={false}>
         <Group>
           {peakCells.map((cell, idx) => {
-            // We need layout-sized canvas. Since Skia fills absoluteFill,
-            // we use percentage-based width/height via a transform trick:
-            // Skia's coordinate system matches the view pixels, so we
-            // use the container size from layout (captured in ref).
-            // On the very first frame before layout, we fall back to a
-            // non-rendering rect (0 size).
-            const { width: vw, height: vh } = containerSizeRef.current;
+            // Skia's coordinate system matches the view pixels, so we scale the
+            // normalized cell rect by the laid-out container size. Before the
+            // first onLayout the size is 0×0, so rects collapse (nothing drawn).
+            const { width: vw, height: vh } = containerSize;
             const x = cell.nx * vw;
             const y = cell.ny * vh;
             const w = cell.nw * vw;
@@ -159,7 +153,7 @@ function FocusPeakingOverlayImpl({
             );
           })}
           {peakCells.map((cell, idx) => {
-            const { width: vw, height: vh } = containerSizeRef.current;
+            const { width: vw, height: vh } = containerSize;
             const x = cell.nx * vw;
             const y = cell.ny * vh;
             const w = cell.nw * vw;

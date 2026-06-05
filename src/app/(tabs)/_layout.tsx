@@ -149,7 +149,3 @@ export default function TabsLayout() {
     </Tabs>
   );
 }
-
-const styles = StyleSheet.create({
-  // reserved for future tab bar customisation
-});

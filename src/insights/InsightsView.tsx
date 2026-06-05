@@ -38,7 +38,6 @@ import {
 
 import { useGalleryStore } from '@/state/galleryStore';
 import { useTheme } from '@/hooks/use-theme';
-type Theme = ReturnType<typeof useTheme>;
 import { FontSize, FontWeight, Palette, Radius, Spacing } from '@/constants/theme';
 import { Card } from '@/theme/card';
 
@@ -46,6 +45,8 @@ import { computeRollMetrics } from './metrics';
 import type { RollInsight } from './metrics';
 import { Histogram } from './Histogram';
 import { ClippingCard } from './ClippingCard';
+
+type Theme = ReturnType<typeof useTheme>;
 
 // ---------------------------------------------------------------------------
 // InsightRow — renders one template insight card

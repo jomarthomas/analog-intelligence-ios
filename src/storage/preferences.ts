@@ -329,9 +329,15 @@ export function setPreference(key: keyof UserPreferences, value: boolean | numbe
  * Useful after unlocking Pro or resetting to defaults.
  */
 export function setAllPreferences(prefs: UserPreferences): void {
-  (Object.keys(prefs) as Array<keyof UserPreferences>).forEach((key) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setPreference(key as Parameters<typeof setPreference>[0], (prefs as any)[key]);
+  // Use the implementation signature of setPreference (which accepts the union
+  // of all value types) so we can iterate generically without the per-key
+  // overloads forcing a cast to `any`.
+  const setAny = setPreference as (
+    key: keyof UserPreferences,
+    value: boolean | number | string | undefined,
+  ) => void;
+  (Object.keys(prefs) as (keyof UserPreferences)[]).forEach((key) => {
+    setAny(key, prefs[key]);
   });
 }
 

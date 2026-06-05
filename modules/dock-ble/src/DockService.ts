@@ -19,7 +19,11 @@
  */
 
 import { DockStateMachine } from './DockStateMachine';
-import { SimulatedDock, type SimulationConfig } from './SimulatedDock';
+import {
+  SimulatedDock,
+  type SimulationConfig,
+  type IDockTransport,
+} from './SimulatedDock';
 import type {
   DockConnectOptions,
   DockEvent,
@@ -31,7 +35,6 @@ import type {
   DockStatus,
   RollScanConfig,
 } from './DockBle.types';
-import type { IDockTransport } from './SimulatedDock';
 
 // Default roll config (36 frames, 3 retries, quality threshold 0.7).
 const DEFAULT_ROLL_CONFIG: Required<RollScanConfig> = {

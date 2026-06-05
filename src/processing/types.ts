@@ -17,7 +17,7 @@
  */
 
 // ---------------------------------------------------------------------------
-// Import + re-export native-module contract verbatim
+// Imports — native-module contract + storage-layer types
 // ---------------------------------------------------------------------------
 
 import type {
@@ -26,14 +26,17 @@ import type {
   ProcessResult,
   Histogram,
 } from '../../modules/ai-image-processing/src/AiImageProcessing.types';
+import type { CropRect, ProcessParamsSnapshot, ScannedImage } from '../storage/models';
+
+// ---------------------------------------------------------------------------
+// Re-export the native-module contract verbatim
+// ---------------------------------------------------------------------------
 
 export type { FilmMode, ProcessParams, ProcessResult, Histogram };
 
 // ---------------------------------------------------------------------------
 // Storage-layer extension: ProcessParams + TS-only fields
 // ---------------------------------------------------------------------------
-
-import type { CropRect } from '../storage/models';
 
 /**
  * FullProcessParams extends the native ProcessParams with fields that are
@@ -122,8 +125,6 @@ export interface FullProcessParams {
 // Helpers: coerce between FullProcessParams and the storage snapshot
 // ---------------------------------------------------------------------------
 
-import type { ProcessParamsSnapshot } from '../storage/models';
-
 /**
  * Extract the native-module slice from FullProcessParams.
  * Drops cropRect and rotationDegrees which are TS-layer only.
@@ -198,8 +199,6 @@ export function fromSnapshot(
 // ---------------------------------------------------------------------------
 // Pipeline-level result type (superset of ProcessResult)
 // ---------------------------------------------------------------------------
-
-import type { ScannedImage } from '../storage/models';
 
 /**
  * What runPipeline resolves to: the fully-committed ScannedImage, plus the

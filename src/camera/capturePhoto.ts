@@ -21,7 +21,6 @@ import type {
   CameraPhotoOutput,
   CapturePhotoSettings,
   Photo,
-  TargetPhotoContainerFormat,
 } from 'react-native-vision-camera';
 
 import { CAPTURE_FORMATS, type CaptureFormat, type CaptureResult } from '@/camera/types';
@@ -61,7 +60,6 @@ export async function capturePhoto(
     } catch (err) {
       // Graceful fallback: device/session rejected RAW — capture HEIC instead.
       if (__DEV__) {
-        // eslint-disable-next-line no-console
         console.warn('[capturePhoto] RAW capture failed, falling back to HEIC:', err);
       }
       return await captureProcessed(photoOutput, settings, scansDir, 'heic');
@@ -85,7 +83,9 @@ async function captureProcessed(
   scansDir: Directory,
   format: Exclude<CaptureFormat, 'dng'>,
 ): Promise<CaptureResult> {
-  const containerFormat: TargetPhotoContainerFormat = format;
+  // Note: the container format (HEIC/JPEG) is configured on the photo OUTPUT
+  // via usePhotoOutput({ containerFormat }) in CameraScanView — VisionCamera v5
+  // sets it at the output level, not per-capture — so it is not passed here.
   let photo: Photo | undefined;
   try {
     photo = await photoOutput.capturePhoto({ ...settings }, {});

@@ -50,13 +50,13 @@
  * See individual module files for detailed TODO(model) markers.
  */
 
-export type { AIOperation, AIEnhancementOptions, AIEnhancementResult, ModelAvailability } from './types';
-
-export { checkAvailability, loadModel, unloadModel, getDescriptor } from './modelManager';
-
 import { reconstructColor } from './colorReconstruction';
 import { removeDustScratches } from './dustRemoval';
 import type { AIEnhancementOptions, AIEnhancementResult, AIOperation } from './types';
+
+export type { AIOperation, AIEnhancementOptions, AIEnhancementResult, ModelAvailability } from './types';
+
+export { checkAvailability, loadModel, unloadModel, getDescriptor } from './modelManager';
 
 // ---------------------------------------------------------------------------
 // Primary entry point

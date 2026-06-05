@@ -42,8 +42,7 @@ import {
   type TargetPhotoContainerFormat,
 } from 'react-native-vision-camera';
 
-import { Button } from '@/theme';
-import { Palette, Spacing, FontSize, FontWeight, Radius } from '@/theme';
+import { Button, Palette, Spacing, FontSize, FontWeight, Radius } from '@/theme';
 import { useCaptureStore, PEAKING_THRESHOLDS } from '@/state/captureStore';
 import { useCameraPermissions } from '@/camera/useCameraPermissions';
 import { useFrameProcessors } from '@/camera/useFrameProcessors';
@@ -189,7 +188,6 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
       onCaptured(result.uri);
     } catch (err) {
       if (__DEV__) {
-        // eslint-disable-next-line no-console
         console.error('[CameraScanView] capture failed:', err);
       }
       onError?.(err);

@@ -54,6 +54,9 @@ export function useCameraPermissions(): CameraPermissionsResult {
 
   // Auto-request exactly once on mount when we don't yet have permission and
   // are still allowed to ask (mirrors legacy auto-request on screen appear).
+  // The setHasResolved calls are one-shot mount resolutions (settling the
+  // "checking" state), not a render loop.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (hasPermission) {
       setHasResolved(true);
@@ -68,6 +71,7 @@ export function useCameraPermissions(): CameraPermissionsResult {
     // Only run on mount / when the underlying permission identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const openSettings = useCallback(async (): Promise<void> => {
     await Linking.openSettings();

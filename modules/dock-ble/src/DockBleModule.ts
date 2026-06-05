@@ -33,7 +33,7 @@
  *     notifications; fires 'dockEvent' events via the EventEmitter
  */
 
-import { requireNativeModule } from 'expo';
+import { requireOptionalNativeModule } from 'expo';
 
 /**
  * The native module interface.
@@ -112,4 +112,14 @@ export interface DockBleNativeModule {
   subscribeToFrameEvents(peripheralId: string): Promise<void>;
 }
 
-export default requireNativeModule<DockBleNativeModule>('DockBle');
+/**
+ * The native DockBle module, or `null` when it is not registered in the current
+ * binary (e.g. the Phase-3 BLE native skeleton hasn't been built into the app,
+ * or running in Expo Go). We use `requireOptionalNativeModule` rather than
+ * `requireNativeModule` so that merely importing this file — which the `dock-ble`
+ * barrel does eagerly, and which the Scan screen pulls in via useDockStore —
+ * never throws and crashes app startup. The default transport is SimulatedDock,
+ * which does not need this native module; callers that DO need real BLE must
+ * null-check this export.
+ */
+export default requireOptionalNativeModule<DockBleNativeModule>('DockBle');

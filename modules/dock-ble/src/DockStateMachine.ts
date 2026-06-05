@@ -121,7 +121,7 @@ export class DockStateMachine {
     return this._lastError;
   }
 
-  get stateHistory(): ReadonlyArray<DockStateTransition> {
+  get stateHistory(): readonly DockStateTransition[] {
     return this._history;
   }
 

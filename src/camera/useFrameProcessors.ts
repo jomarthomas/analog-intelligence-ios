@@ -26,7 +26,7 @@
  *   No manual babel.config.js change is needed while babel-preset-expo is used.
  */
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFrameOutput } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-worklets';
 
@@ -105,6 +105,9 @@ const GRID_COLS = 32;
 /** Number of rows in the peak grid. */
 const GRID_ROWS = 24;
 
+/** Stable empty-cell array returned when peaking is disabled (avoids re-renders). */
+const EMPTY_CELLS: PeakCell[] = [];
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -132,23 +135,26 @@ export function useFrameProcessors(
   peaking: FocusPeakingOptions,
   _detectionEnabled: boolean,
 ): FrameProcessorsResult {
-  // Store the latest peak cells in a ref so the Skia overlay can read them
-  // on the React thread. We use a plain ref + setState pattern so the overlay
-  // re-renders on each frame's update.
-  const peakCellsRef = useRef<PeakCell[]>([]);
+  // Latest in-focus cells, held in React state so the Skia overlay actually
+  // re-renders when the worklet pushes a new set via runOnJS. (A plain ref
+  // would never trigger a re-render — the overlay would stay blank.)
+  const [peakCells, setPeakCellsState] = useState<PeakCell[]>([]);
   // This ref holds the latest resolved threshold so worklets can capture it
   // without a stale closure on every render.
   const thresholdRef = useRef<number>(PEAKING_THRESHOLDS[peaking.sensitivity]);
   const enabledRef = useRef<boolean>(peaking.enabled);
 
-  // Keep refs in sync with props every render (worklets close over the ref
-  // value at call time, not at hook-creation time, so this is safe).
-  thresholdRef.current = PEAKING_THRESHOLDS[peaking.sensitivity];
-  enabledRef.current = peaking.enabled;
+  // Keep refs in sync with props (worklets close over the ref value at call
+  // time, not at hook-creation time). Updated in an effect because writing a
+  // ref during render is disallowed under the React Compiler.
+  useEffect(() => {
+    thresholdRef.current = PEAKING_THRESHOLDS[peaking.sensitivity];
+    enabledRef.current = peaking.enabled;
+  }, [peaking.sensitivity, peaking.enabled]);
 
   // runOnJS-safe setter that the worklet will call on the JS thread.
   const setPeakCells = useCallback((cells: PeakCell[]) => {
-    peakCellsRef.current = cells;
+    setPeakCellsState(cells);
   }, []);
 
   const frameOutput = useFrameOutput({
@@ -283,7 +289,9 @@ export function useFrameProcessors(
     isPeakingActive: peaking.enabled,
     isDetectionActive: false,
     detectedFrame: null,
-    peakCells: peakCellsRef.current,
+    // Gate on `enabled` so stale highlights from a previous session never show
+    // (the worklet only clears its own output while actively running).
+    peakCells: peaking.enabled ? peakCells : EMPTY_CELLS,
     onPeakCells: setPeakCells,
   };
 }

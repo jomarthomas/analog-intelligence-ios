@@ -101,8 +101,11 @@ export function useProStatus(): ProStatusState {
     }
   }, []);
 
-  // Refresh once on mount.
+  // Refresh once on mount. refresh() sets loading state synchronously as part
+  // of kicking off the async RevenueCat check — an intentional load-on-mount,
+  // not a render loop.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 

@@ -239,7 +239,6 @@ export default function ScanScreen() {
         isPersistingRef.current = false;
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [router, cameraLayout],
   );
 

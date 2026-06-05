@@ -72,13 +72,14 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
   // Local expand/collapse (not global UI state).
   const expanded = useExpanded();
 
-  const controller = () => cameraRef.current?.controller;
+  // Stable accessor for the live camera controller. Memoized (it only reads a
+  // ref) so it can be listed in callback dependency arrays without churn.
+  const controller = useCallback(() => cameraRef.current?.controller, [cameraRef]);
 
   // Re-read live 3A values into the store (legacy `updateCurrentValues`).
   const refreshSnapshot = useCallback(() => {
     setSnapshot(readSnapshot(controller()));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setSnapshot]);
+  }, [controller, setSnapshot]);
 
   // --- Focus ---------------------------------------------------------------
   const onFocusChange = useCallback(
@@ -93,9 +94,8 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
       } catch {
         /* unsupported / transient */
       }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     },
-    [capabilities.supportsFocusLocking, setSnapshot, setLocks],
+    [controller, capabilities.supportsFocusLocking, setSnapshot, setLocks],
   );
 
   // --- Exposure (ISO + shutter share setExposureLocked) --------------------
@@ -116,9 +116,9 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
       } catch {
         /* unsupported / transient */
       }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     },
     [
+      controller,
       capabilities.supportsExposureLocking,
       capabilities.minISO,
       capabilities.maxISO,
@@ -192,9 +192,9 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
           /* give up silently */
         }
       }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     },
     [
+      controller,
       capabilities.supportsWhiteBalanceLocking,
       capabilities.maxWhiteBalanceGain,
       locks.focus,
@@ -223,6 +223,7 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
       /* ignore */
     }
   }, [
+    controller,
     capabilities.supportsFocusLocking,
     capabilities.supportsExposureLocking,
     capabilities.supportsWhiteBalanceLocking,
@@ -241,7 +242,7 @@ export function ManualControlsPanel({ cameraRef }: ManualControlsPanelProps) {
     } catch {
       /* ignore */
     }
-  }, [setAllLocks, setWhiteBalancePreset, refreshSnapshot]);
+  }, [controller, setAllLocks, setWhiteBalancePreset, refreshSnapshot]);
 
   const anyManualSupported =
     capabilities.supportsFocusLocking ||

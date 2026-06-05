@@ -38,7 +38,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { PipelineError, fromSnapshot, toSnapshot } from './types';
+import { PipelineError, toSnapshot } from './types';
 import type { FullProcessParams, PipelineResult } from './types';
 import { DEFAULT_FULL_PROCESS_PARAMS } from './defaults';
 import { isPipelineFallback, previewParams, runPipeline } from './pipeline';
@@ -149,9 +149,14 @@ export function usePipeline({
 
   // Track the latest params ref so the debounced callback always sees the
   // most-current value even if it fires after a rapid succession of setParam
-  // calls (avoids stale closure over an older params snapshot).
+  // calls (avoids stale closure over an older params snapshot). The ref is
+  // synced in an effect (writing a ref during render is disallowed under the
+  // React Compiler) — commit()/forcePreview() only read it from callbacks that
+  // run after commit, so the post-render sync is always current for them.
   const latestParamsRef = useRef<FullProcessParams>(params);
-  latestParamsRef.current = params;
+  useEffect(() => {
+    latestParamsRef.current = params;
+  }, [params]);
 
   // Debounce timer reference
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -217,14 +222,19 @@ export function usePipeline({
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
       }
-      // Invalidate any in-flight requests
+      // Invalidate any in-flight requests. These are internal bookkeeping refs
+      // (a timer handle + a request counter), not refs to rendered nodes, so we
+      // intentionally read/mutate their live values at unmount.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       requestIdRef.current++;
     };
   }, []);
 
   // Run an initial preview when the hook mounts (so the screen doesn't
-  // show a blank preview area on open).
+  // show a blank preview area on open). The synchronous setState inside
+  // runPreview is an intentional "load on mount" kick-off, not a render-loop.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void runPreview(initialParams);
     // Only re-run if originalUri changes (not on every initialParams re-render)
     // eslint-disable-next-line react-hooks/exhaustive-deps
