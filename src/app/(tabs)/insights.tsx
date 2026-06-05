@@ -44,18 +44,18 @@ function InsightsLocked() {
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={[styles.title, { color: theme.text }]}>INSIGHTS</Text>
-        <View style={[styles.proBadge, { backgroundColor: Palette.proBadgeBg }]}>
-          <Text style={styles.proBadgeText}>PRO</Text>
+        <View style={[styles.proBadge, { backgroundColor: theme.accent }]}>
+          <Text style={[styles.proBadgeText, { color: theme.accentText }]}>PRO</Text>
         </View>
       </View>
 
-      {/* Faux histogram teaser bars (amber, like the real chart). */}
+      {/* Faux histogram teaser bars (monochrome, like the real chart). */}
       <View style={[styles.teaser, { backgroundColor: theme.backgroundCard, borderColor: theme.border }]}>
         <View style={styles.bars}>
           {TEASER_BARS.map((h, i) => (
             <View
               key={i}
-              style={[styles.bar, { height: `${h}%`, backgroundColor: Palette.amber }]}
+              style={[styles.bar, { height: `${h}%`, backgroundColor: theme.accent }]}
             />
           ))}
         </View>

@@ -51,7 +51,7 @@ function FrameAlignmentOverlayImpl({
   aspectRatio = 1.5,
   widthFraction = 0.86,
   showGrid = true,
-  color = Palette.amber,
+  color = Palette.ink,
   style,
 }: FrameAlignmentOverlayProps) {
   // The frame box sizes itself off width; height derives from aspect ratio.

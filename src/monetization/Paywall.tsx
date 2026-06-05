@@ -187,7 +187,7 @@ export function Paywall({ onClose }: PaywallProps) {
         showsVerticalScrollIndicator={false}>
         {/* Hero */}
         <View style={styles.hero}>
-          <Text style={styles.heroIcon}>◆</Text>
+          <Text style={[styles.heroIcon, { color: theme.accent }]}>◆</Text>
           <ProBadge size="lg" />
           <Text style={[styles.heroTitle, { color: theme.text }]}>
             Analog Intelligence Pro
@@ -202,7 +202,7 @@ export function Paywall({ onClose }: PaywallProps) {
         <Card padding="lg" style={styles.featuresCard}>
           {PRO_FEATURES.map((feature) => (
             <View key={feature.title} style={styles.featureRow}>
-              <Text style={styles.featureIcon}>{feature.icon}</Text>
+              <Text style={[styles.featureIcon, { color: theme.accent }]}>{feature.icon}</Text>
               <View style={styles.featureText}>
                 <Text
                   style={[
@@ -237,7 +237,7 @@ export function Paywall({ onClose }: PaywallProps) {
         ) : (
           <View style={styles.purchaseSection}>
             {fetchingOffering ? (
-              <ActivityIndicator color={Palette.amber} size="large" />
+              <ActivityIndicator color={theme.accent} size="large" />
             ) : offering !== null && offering.availablePackages.length > 0 ? (
               <>
                 {offering.availablePackages.map((pkg) => (

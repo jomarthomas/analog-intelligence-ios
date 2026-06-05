@@ -59,7 +59,7 @@ export function Button({
 
   const textColor =
     variant === 'primary'
-      ? Palette.black
+      ? theme.accentText
       : variant === 'danger'
         ? Palette.white
         : theme.text;
@@ -75,7 +75,7 @@ export function Button({
       {loading ? (
         <ActivityIndicator
           size="small"
-          color={variant === 'primary' ? Palette.black : theme.accent}
+          color={variant === 'primary' ? theme.accentText : theme.accent}
         />
       ) : (
         <Text

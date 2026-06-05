@@ -133,7 +133,7 @@ function DetectedFrameOverlayImpl({
   // Scale the crop-rect if present.
   const scaledCrop = cropRect ? scaleRect(cropRect, iW, iH, vW, vH) : null;
 
-  const color = Palette.amber;
+  const color = Palette.ink;
   const dimColor = withAlpha(color, 0.35);
 
   return (
@@ -300,7 +300,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.25)',
   },
   applyBtn: {
-    backgroundColor: Palette.amber,
+    backgroundColor: Palette.ink,
   },
   actionText: {
     fontSize: FontSize.sm,

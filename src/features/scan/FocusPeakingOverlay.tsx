@@ -52,7 +52,7 @@ function peakingFillColor(color: PeakingColorType): string {
     case 'white':
       return 'rgba(255, 255, 255, 0.60)';
     default:
-      // Warm amber — primary theme colour (Palette.amber = #FF9933 at 60% alpha)
+      // Warm amber — primary theme colour (Palette.ink = #FF9933 at 60% alpha)
       return 'rgba(255, 153, 51, 0.60)';
   }
 }
@@ -116,7 +116,7 @@ function FocusPeakingOverlayImpl({
 
   const fillColor = peakingFillColor(peakingColor);
   // Amber border at lower opacity for a crisp outline without over-saturating.
-  const strokeColor = Palette.amber;
+  const strokeColor = Palette.ink;
 
   return (
     <View

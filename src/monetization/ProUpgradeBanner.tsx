@@ -114,9 +114,10 @@ export function ProUpgradeBanner({
             onPress={handlePress}
             style={({ pressed }) => [
               styles.ctaButton,
+              { backgroundColor: theme.accent },
               pressed && styles.ctaButtonPressed,
             ]}>
-            <Text style={styles.ctaText}>{label}</Text>
+            <Text style={[styles.ctaText, { color: theme.accentText }]}>{label}</Text>
           </Pressable>
 
           {dismissible && (

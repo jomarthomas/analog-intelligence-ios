@@ -56,8 +56,8 @@ export function SettingsToggleRow({
           value={value}
           onValueChange={onValueChange}
           disabled={disabled}
-          trackColor={{ false: theme.backgroundSelected, true: Palette.amber }}
-          thumbColor={Palette.white}
+          trackColor={{ false: theme.backgroundSelected, true: theme.accent }}
+          thumbColor={value ? theme.accentText : Palette.white}
           ios_backgroundColor={theme.backgroundSelected}
         />
       </View>

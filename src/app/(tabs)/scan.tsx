@@ -402,7 +402,7 @@ function DockControls({
 
       {isActive ? (
         <View style={styles.scanningRow}>
-          <View style={[styles.scanDot, { backgroundColor: Palette.amber }]} />
+          <View style={[styles.scanDot, { backgroundColor: Palette.ink }]} />
           <Text style={styles.scanningText}>Scanning…</Text>
         </View>
       ) : null}
@@ -448,7 +448,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.85)',
   },
   primaryBtn: {
-    backgroundColor: Palette.amber,
+    backgroundColor: Palette.ink,
     paddingHorizontal: Spacing.xl,
     paddingVertical: Spacing.sm,
     borderRadius: Radius.full,

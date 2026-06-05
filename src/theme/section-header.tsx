@@ -23,7 +23,7 @@ export function SectionHeader({ title, right, style }: SectionHeaderProps) {
 
   return (
     <View style={[styles.container, style]}>
-      <Text style={[styles.title, { color: theme.textSecondary }]}>
+      <Text style={[styles.title, { color: theme.textTertiary }]}>
         {title.toUpperCase()}
       </Text>
       {right}

@@ -7,47 +7,53 @@
  * NativeTabs/unstable-native-tabs because the unstable API is not yet
  * reliable on SDK 56 for all four tabs with typed routes.
  *
- * Tab icons: expo-symbols SF Symbols on iOS; text-based fallbacks on
- * Android/web. We do NOT rely on assets/images/tabIcons PNGs.
+ * Tab icons: SF Symbols on iOS; monochrome SVG line glyphs as the
+ * cross-platform fallback (the app is black & white, so emoji — which render in
+ * full colour — are not used).
  */
 
-import { Platform, StyleSheet, Text, type ColorValue } from 'react-native';
+import { ReactElement } from 'react';
+import { Platform, StyleSheet, type ColorValue } from 'react-native';
 import { Tabs } from 'expo-router/js-tabs';
 import { SymbolView } from 'expo-symbols';
 import type { SFSymbol } from 'sf-symbols-typescript';
 
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, FontWeight } from '@/constants/theme';
+import {
+  CameraGlyph,
+  GalleryGlyph,
+  InsightsGlyph,
+  SettingsGlyph,
+} from '@/components/tab-icons';
 
 // ---------------------------------------------------------------------------
 // Tab icon helper
 // ---------------------------------------------------------------------------
+type GlyphComponent = (props: {
+  color: ColorValue;
+  size: number;
+  focused?: boolean;
+}) => ReactElement;
+
 type TabIconProps = {
   /** SF Symbol name — must be a valid SFSymbol literal */
   symbolName: SFSymbol;
-  /** Text/emoji fallback for Android / web */
-  fallbackChar: string;
+  /** Monochrome SVG fallback for Android / web */
+  Glyph: GlyphComponent;
   focused: boolean;
   color: ColorValue;
   size: number;
 };
 
-function TabIcon({ symbolName, fallbackChar, focused, color, size }: TabIconProps) {
+function TabIcon({ symbolName, Glyph, focused, color, size }: TabIconProps) {
   return (
     <SymbolView
       name={symbolName}
       tintColor={color}
       size={size}
       weight={focused ? 'semibold' : 'regular'}
-      fallback={
-        <Text
-          style={{
-            color,
-            fontSize: Platform.OS === 'android' ? size * 0.7 : size * 0.8,
-          }}>
-          {fallbackChar}
-        </Text>
-      }
+      fallback={<Glyph color={color} size={size} focused={focused} />}
     />
   );
 }
@@ -72,6 +78,7 @@ export default function TabsLayout() {
         tabBarLabelStyle: {
           fontSize: FontSize.xs,
           fontWeight: FontWeight.medium,
+          letterSpacing: 0.2,
           marginBottom: Platform.OS === 'ios' ? 0 : 4,
         },
         tabBarIconStyle: {
@@ -87,7 +94,7 @@ export default function TabsLayout() {
           tabBarIcon: ({ focused, color, size }) => (
             <TabIcon
               symbolName="camera.fill"
-              fallbackChar="📷"
+              Glyph={CameraGlyph}
               focused={focused}
               color={color}
               size={size}
@@ -104,7 +111,7 @@ export default function TabsLayout() {
           tabBarIcon: ({ focused, color, size }) => (
             <TabIcon
               symbolName="photo.on.rectangle.angled"
-              fallbackChar="🖼"
+              Glyph={GalleryGlyph}
               focused={focused}
               color={color}
               size={size}
@@ -121,7 +128,7 @@ export default function TabsLayout() {
           tabBarIcon: ({ focused, color, size }) => (
             <TabIcon
               symbolName="waveform.path.ecg"
-              fallbackChar="📊"
+              Glyph={InsightsGlyph}
               focused={focused}
               color={color}
               size={size}
@@ -138,7 +145,7 @@ export default function TabsLayout() {
           tabBarIcon: ({ focused, color, size }) => (
             <TabIcon
               symbolName="gearshape.fill"
-              fallbackChar="⚙️"
+              Glyph={SettingsGlyph}
               focused={focused}
               color={color}
               size={size}

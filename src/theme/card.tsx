@@ -46,7 +46,7 @@ export function Card({ children, padding = 'md', elevated = false, style }: Card
 
 const styles = StyleSheet.create({
   card: {
-    borderRadius: Radius.md,
+    borderRadius: Radius.lg,
     overflow: 'hidden',
   },
 });

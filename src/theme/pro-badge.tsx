@@ -1,5 +1,8 @@
 /**
- * ProBadge — small orange "PRO" pill used throughout the app to gate features.
+ * ProBadge — small "PRO" pill used throughout the app to gate features.
+ *
+ * Black & white: an inverted high-contrast pill (black-on-white in light mode,
+ * white-on-black in dark mode) via the theme accent / accentText pair.
  *
  * Usage:
  *   <ProBadge />
@@ -8,13 +11,16 @@
 
 import { StyleSheet, Text, View } from 'react-native';
 
-import { FontSize, FontWeight, Palette, Radius, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
+import { FontSize, FontWeight, Radius, Spacing } from '@/constants/theme';
 
 type ProBadgeProps = {
   size?: 'sm' | 'md' | 'lg';
 };
 
 export function ProBadge({ size = 'sm' }: ProBadgeProps) {
+  const theme = useTheme();
+
   const fontSize =
     size === 'lg' ? FontSize.sm : size === 'md' ? FontSize.xs : 10;
   const px = size === 'lg' ? Spacing.sm : Spacing.xs;
@@ -24,23 +30,21 @@ export function ProBadge({ size = 'sm' }: ProBadgeProps) {
     <View
       style={[
         styles.badge,
-        { paddingHorizontal: px, paddingVertical: py },
+        { backgroundColor: theme.accent, paddingHorizontal: px, paddingVertical: py },
       ]}>
-      <Text style={[styles.text, { fontSize }]}>PRO</Text>
+      <Text style={[styles.text, { color: theme.accentText, fontSize }]}>PRO</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   badge: {
-    backgroundColor: Palette.proBadgeBg,
     borderRadius: Radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
   },
   text: {
-    color: Palette.proBadgeText,
     fontWeight: FontWeight.bold,
-    letterSpacing: 0.5,
+    letterSpacing: 1,
   },
 });

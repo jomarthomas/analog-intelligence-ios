@@ -46,8 +46,8 @@ export function AIToggleRow({
       <Switch
         value={value}
         onValueChange={onValueChange}
-        trackColor={{ false: theme.backgroundSelected, true: Palette.amber }}
-        thumbColor={Palette.white}
+        trackColor={{ false: theme.backgroundSelected, true: theme.accent }}
+        thumbColor={value ? theme.accentText : Palette.white}
         ios_backgroundColor={theme.backgroundSelected}
       />
     </View>
