@@ -93,6 +93,8 @@ export interface CaptureState {
    * later. The #1 workflow request for mobile film scanners.
    */
   batchMode: boolean;
+  /** Multi-shot denoise: capture N frames + average (best on a copy-stand). */
+  multiShot: boolean;
 
   // --- Actions ---
   setCaptureFormat: (format: CaptureFormat) => void;
@@ -119,6 +121,7 @@ export interface CaptureState {
 
   toggleBatchMode: () => void;
   setBatchMode: (on: boolean) => void;
+  toggleMultiShot: () => void;
 
   /** Reset transient state (e.g. when leaving the scan screen). */
   reset: () => void;
@@ -171,6 +174,7 @@ export const useCaptureStore = create<CaptureState>((set, get) => ({
 
   isCapturing: false,
   batchMode: false,
+  multiShot: false,
 
   // -----------------------------------------------------------------------
   setCaptureFormat: (format) => set({ captureFormat: format }),
@@ -227,6 +231,7 @@ export const useCaptureStore = create<CaptureState>((set, get) => ({
 
   toggleBatchMode: () => set((s) => ({ batchMode: !s.batchMode })),
   setBatchMode: (on) => set({ batchMode: on }),
+  toggleMultiShot: () => set((s) => ({ multiShot: !s.multiShot })),
 
   reset: () =>
     set({
