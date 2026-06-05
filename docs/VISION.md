@@ -72,4 +72,4 @@ The legacy codebase (preserved under `legacy-ios/`) is a mature, production-qual
 
 > *Scan with your phone. Develop with intelligence.*
 
-The app is warm in tone (the orange of the darkroom safelight runs through the design system), precise in function, and honest about what it is: a tool that respects the craft of film photography and meets the photographer where they are.
+The app is minimalist and monochrome (a high-contrast black-and-white design system, in the spirit of an editorial darkroom print), precise in function, and honest about what it is: a tool that respects the craft of film photography and meets the photographer where they are.

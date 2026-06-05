@@ -1,6 +1,16 @@
 # Native Module API — `modules/ai-image-processing`
 
-This document is the **binding contract** between the Pipeline agent (TypeScript orchestration in `src/processing/`) and the Native agent (Swift + Kotlin implementations in `modules/ai-image-processing/`). Both agents must treat this as an API: changes to function signatures or type shapes require orchestrator approval and must be coordinated as breaking changes.
+> ⚠️ **Status: original design draft (aspirational) — NOT the shipped surface.**
+> The **canonical, implemented** native contract is the code itself —
+> [`modules/ai-image-processing/index.ts`](../modules/ai-image-processing/index.ts) —
+> with iOS⇄Android behaviour documented in
+> [`PARITY.md`](../modules/ai-image-processing/PARITY.md). The implemented API uses
+> `FilmMode = 'color' | 'bw' | 'slide'` (not `FilmType`) and adds
+> `estimateFilmBaseNeutral` (one-tap WB), `averageFrames` (multi-shot denoise), an
+> `applyLut` seam, and a `maxDimension` preview option. Treat the richer signatures
+> below as the design target, not current behaviour.
+
+This document was the original **design contract** between the Pipeline agent (TypeScript orchestration in `src/processing/`) and the Native agent (Swift + Kotlin implementations in `modules/ai-image-processing/`). Function-signature or type changes are coordinated through the orchestrator as breaking changes.
 
 The module's entry point is `modules/ai-image-processing/index.ts`. All types below are exported from that file or from `src/processing/types.ts` (see the shared-contract note in AGENTS.md).
 
