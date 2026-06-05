@@ -13,7 +13,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import Slider from '@react-native-community/slider';
 
 import { useTheme } from '@/hooks/use-theme';
-import { FontSize, FontWeight, Palette, Spacing } from '@/constants/theme';
+import { FontSize, FontWeight, Spacing } from '@/constants/theme';
 
 export type AdjustSliderProps = {
   /** Row label, e.g. "Exposure". */
@@ -71,9 +71,9 @@ export function AdjustSlider({
         maximumValue={max}
         step={step}
         onValueChange={onChange}
-        minimumTrackTintColor={Palette.amber}
+        minimumTrackTintColor={theme.accent}
         maximumTrackTintColor={theme.backgroundSelected}
-        thumbTintColor={Palette.amber}
+        thumbTintColor={theme.accent}
       />
     </View>
   );

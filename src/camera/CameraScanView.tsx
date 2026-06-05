@@ -274,7 +274,7 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
 
       {!sessionReady ? (
         <View style={styles.loadingOverlay} pointerEvents="none">
-          <ActivityIndicator color={Palette.amber} />
+          <ActivityIndicator color={Palette.ink} />
         </View>
       ) : null}
     </View>
@@ -297,7 +297,7 @@ function PermissionGate({
   return (
     <View style={styles.gate}>
       {variant === 'checking' ? (
-        <ActivityIndicator color={Palette.amber} />
+        <ActivityIndicator color={Palette.ink} />
       ) : (
         <>
           <Text style={styles.gateTitle}>
@@ -484,7 +484,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.55)',
   },
   topButtonActive: {
-    backgroundColor: Palette.amber,
+    backgroundColor: Palette.ink,
   },
   topButtonDisabled: {
     opacity: 0.4,
@@ -543,7 +543,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   shutterInnerCapturing: {
-    backgroundColor: Palette.amber,
+    backgroundColor: Palette.ink,
   },
   shutterDisabled: {
     opacity: 0.5,

@@ -159,8 +159,8 @@ export function InsightsView() {
       <View style={[styles.flex, { backgroundColor: theme.background }]}>
         <View style={styles.headerRow}>
           <Text style={[styles.screenTitle, { color: theme.text }]}>INSIGHTS</Text>
-          <View style={[styles.proBadge, { backgroundColor: Palette.proBadgeBg }]}>
-            <Text style={styles.proBadgeText}>PRO</Text>
+          <View style={[styles.proBadge, { backgroundColor: theme.accent }]}>
+            <Text style={[styles.proBadgeText, { color: theme.accentText }]}>PRO</Text>
           </View>
         </View>
         <EmptyState />
@@ -179,8 +179,8 @@ export function InsightsView() {
       {/* Screen header */}
       <View style={styles.headerRow}>
         <Text style={[styles.screenTitle, { color: theme.text }]}>INSIGHTS</Text>
-        <View style={[styles.proBadge, { backgroundColor: Palette.proBadgeBg }]}>
-          <Text style={styles.proBadgeText}>PRO</Text>
+        <View style={[styles.proBadge, { backgroundColor: theme.accent }]}>
+          <Text style={[styles.proBadgeText, { color: theme.accentText }]}>PRO</Text>
         </View>
       </View>
 

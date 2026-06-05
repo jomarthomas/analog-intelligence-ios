@@ -15,36 +15,52 @@ import { Platform } from 'react-native';
 // Brand palette (raw values — prefer using Colors or AnalogColors below)
 // ---------------------------------------------------------------------------
 export const Palette = {
-  /** Primary orange accent — Kodak/film orange mask, darkroom safelight */
-  amber: '#FF9933',
-  amberDim: '#CC7A28',
-  amberMuted: '#3D2910',
+  // Black & white app — there is no colour accent. Emphasis is pure contrast:
+  // white on black (dark) / black on white (light). `ink`/`paper` are the two
+  // poles; everything else is a calibrated grey.
+  ink: '#FFFFFF', // the "bright" pole (used as accent on dark surfaces)
+  paper: '#000000', // the "dark" pole (used as accent on light surfaces)
 
-  // Dark-mode surfaces
-  darkBg: '#141418',
-  darkCard: '#1E1E28',
-  darkOverlay: 'rgba(0,0,0,0.60)',
-  darkBorder: '#2C2C38',
+  // Legacy accent aliases — the app was amber-accented before going black & white.
+  // Repointed to monochrome so existing `Palette.amber*` call-sites render greyscale
+  // (they all sit on the app's dark camera/gallery surfaces, where white is correct).
+  // Prefer `theme.accent` (mode-aware) or `Palette.ink` in new code.
+  amber: '#FFFFFF',
+  amberDim: '#C7C7C7',
+  amberMuted: 'rgba(255,255,255,0.12)',
 
-  // Light-mode surfaces
-  lightBg: '#F5F4F0',
+  // Dark-mode surfaces — true black, OLED, editorial contrast
+  darkBg: '#000000',
+  darkCard: '#0E0E0E',
+  darkElevated: '#171717',
+  darkOverlay: 'rgba(0,0,0,0.66)',
+  darkBorder: '#262626',
+  darkDivider: 'rgba(255,255,255,0.10)',
+
+  // Light-mode surfaces — clean near-white paper, white cards
+  lightBg: '#F5F5F4',
   lightCard: '#FFFFFF',
-  lightBorder: '#E0DDD8',
+  lightElevated: '#FFFFFF',
+  lightBorder: '#E4E4E2',
+  lightDivider: 'rgba(0,0,0,0.09)',
 
-  // Neutrals
+  // Neutral greys (mode-agnostic)
   white: '#FFFFFF',
+  offWhite: '#F3F3F3',
   black: '#000000',
-  charcoal: '#212225',
-  ash: '#B0B4BA',
-  smoke: '#60646C',
+  charcoal: '#161616',
+  ash: '#8E8E93', // secondary text
+  smoke: '#6B6B70',
 
-  // Status
-  success: '#34C759',
-  warning: '#FF9F0A',
-  danger: '#FF453A',
+  // Status — the only functional colour kept (destructive actions); everything
+  // else is monochrome. Used sparingly.
+  success: '#FFFFFF',
+  warning: '#FFFFFF',
+  danger: '#E5484D',
 
-  // Pro badge
-  proBadgeBg: '#FF9933',
+  // Pro badge fallback (used by a few inline badges on dark surfaces). The
+  // shared <ProBadge> component is theme-aware; these statics stay light-on-dark.
+  proBadgeBg: '#FFFFFF',
   proBadgeText: '#000000',
 } as const;
 
@@ -55,47 +71,57 @@ export const Palette = {
 export const Colors = {
   light: {
     // Kept for backwards-compat with ThemedText / ThemedView
-    text: '#1A1A1A',
+    text: Palette.black,
     background: Palette.lightBg,
     backgroundElement: Palette.lightCard,
-    backgroundSelected: '#E8E5DF',
-    textSecondary: Palette.smoke,
+    backgroundSelected: '#ECECEA',
+    textSecondary: '#6E6E73',
 
     // Analog Intelligence additions
+    textTertiary: '#9A9A9E',
     backgroundCard: Palette.lightCard,
+    backgroundElevated: Palette.lightElevated,
     border: Palette.lightBorder,
-    accent: Palette.amber,
-    accentDim: Palette.amberDim,
-    accentMuted: '#F5E6C8',
-    tabBar: '#FFFFFF',
-    tabBarBorder: Palette.lightBorder,
-    tabIconActive: Palette.amber,
-    tabIconInactive: Palette.smoke,
-    overlay: 'rgba(255,255,255,0.80)',
-    proText: Palette.proBadgeText,
-    proBadge: Palette.proBadgeBg,
+    divider: Palette.lightDivider,
+    // Monochrome "accent" = the dark pole; accentText = what sits on it.
+    accent: Palette.paper,
+    accentText: Palette.white,
+    accentDim: '#2E2E2E',
+    accentMuted: 'rgba(0,0,0,0.06)',
+    tabBar: 'rgba(255,255,255,0.92)',
+    tabBarBorder: Palette.lightDivider,
+    tabIconActive: Palette.paper,
+    tabIconInactive: '#8E8E93',
+    overlay: 'rgba(255,255,255,0.82)',
+    proText: Palette.white,
+    proBadge: Palette.paper,
   },
   dark: {
     // Kept for backwards-compat
     text: Palette.white,
     background: Palette.darkBg,
     backgroundElement: Palette.darkCard,
-    backgroundSelected: '#2A2A38',
+    backgroundSelected: '#1C1C1C',
     textSecondary: Palette.ash,
 
     // Analog Intelligence additions
+    textTertiary: '#5A5A5E',
     backgroundCard: Palette.darkCard,
+    backgroundElevated: Palette.darkElevated,
     border: Palette.darkBorder,
-    accent: Palette.amber,
-    accentDim: Palette.amberDim,
-    accentMuted: Palette.amberMuted,
-    tabBar: '#0F0F13',
-    tabBarBorder: Palette.darkBorder,
-    tabIconActive: Palette.amber,
+    divider: Palette.darkDivider,
+    // Monochrome "accent" = the bright pole; accentText = what sits on it.
+    accent: Palette.ink,
+    accentText: Palette.black,
+    accentDim: '#C7C7C7',
+    accentMuted: 'rgba(255,255,255,0.10)',
+    tabBar: 'rgba(8,8,8,0.92)',
+    tabBarBorder: Palette.darkDivider,
+    tabIconActive: Palette.ink,
     tabIconInactive: Palette.ash,
     overlay: Palette.darkOverlay,
-    proText: Palette.proBadgeText,
-    proBadge: Palette.proBadgeBg,
+    proText: Palette.black,
+    proBadge: Palette.ink,
   },
 } as const;
 
