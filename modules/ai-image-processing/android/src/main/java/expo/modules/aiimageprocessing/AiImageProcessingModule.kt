@@ -59,6 +59,9 @@ class AiImageProcessingModule : Module() {
     @Field val highlights: Double = 0.0
     @Field val shadows: Double = 0.0
     @Field val vibrance: Double = 0.0
+    // Optional LUT selector (bundled-LUT id or .cube file URI). Empty/unknown
+    // means the applyLut stage is a NO-OP (identity). See TODO(lut) in runPipeline.
+    @Field val lut: String = ""
   }
 
   // Task #10: fast-path adjustment record — only the seven user-facing sliders.
@@ -137,6 +140,30 @@ class AiImageProcessingModule : Module() {
       val result = detectFilmFrameHeuristic(bitmap)
       bitmap.recycle()
       result
+    }
+
+    // MARK: estimateFilmBaseNeutral(uri) -> { warmth, tint, found }
+    //
+    // Sample the unexposed film base/rebate (brightest orange max-density
+    // region, via the shared sampleFilmBaseColor) and return a SUGGESTED
+    // white-balance correction in the app's slider units. Powers a one-tap
+    // "neutralize from film base" button. Reads the RAW pre-processing frame.
+    AsyncFunction("estimateFilmBaseNeutral") Coroutine { uri: String ->
+      val bitmap = decodeBitmap(uri) ?: throw ImageNotFoundException()
+      val result = estimateFilmBaseNeutral(bitmap)
+      bitmap.recycle()
+      result
+    }
+
+    // MARK: averageFrames(uris) -> { uri, width, height }
+    //
+    // Multi-shot denoise: decode N same-size frames and output their per-pixel
+    // MEAN (~sqrt(N) sensor-noise reduction — a phone take on SilverFast
+    // Multi-Exposure). If sizes differ or N < 2, the first frame is returned
+    // unchanged. ASSUMES THE FRAMES ARE ALREADY ALIGNED — no registration is
+    // performed (handheld bursts will ghost; alignment is a documented TODO).
+    AsyncFunction("averageFrames") Coroutine { uris: List<String> ->
+      averageFrames(uris)
     }
   }
 
@@ -311,6 +338,11 @@ class AiImageProcessingModule : Module() {
       sharpenLuminance(r, g, b, w, h, params.sharpen.toFloat())
     }
 
+    // Step 9 — LUT "look" (film-emulation). Identity NO-OP scaffold today; see
+    // applyLut for the TODO(lut). Runs as the final colour stage, AFTER the
+    // tone curve + user adjustments and BEFORE the sRGB encode, mirroring iOS.
+    applyLut(r, g, b, params.lut)
+
     // Encode back to sRGB and pack into ARGB ints.
     val out = IntArray(n)
     for (i in 0 until n) {
@@ -425,6 +457,12 @@ class AiImageProcessingModule : Module() {
 
   private val defaultMask = OrangeMask(1.0f, 0.65f, 0.4f, 0.6f)
 
+  // Tuning constants for the base-RGB -> warmth/tint mapping in
+  // estimateFilmBaseNeutral (must match the iOS kBaseWarmthGain / kBaseTintGain).
+  // Conservative first estimates — see PARITY.md; may want on-device tuning.
+  private val BASE_WARMTH_GAIN = 1.5f
+  private val BASE_TINT_GAIN = 2.0f
+
   // Orange-mask estimation now **prefers film-base (rebate) sampling** — the
   // Android twin of the iOS `estimateOrangeMask(image:preInvert:)`.
   //
@@ -442,12 +480,35 @@ class AiImageProcessingModule : Module() {
   /**
    * Sample the brightest, most-saturated-orange region of the PRE-invert image
    * (the film base). Returns null if no convincing orange base is present so the
-   * caller can fall back to the legacy dark-region method. Thresholds are
-   * deterministic and mirror the iOS `estimateMaskFromFilmBase`.
+   * caller can fall back to the legacy dark-region method. The orange-mask
+   * consumer of the shared [sampleFilmBaseColor]; forwards the averaged base
+   * colour into the unchanged [densitiesFromBase] so the removal math matches.
    */
   private fun estimateMaskFromFilmBase(
     preR: FloatArray, preG: FloatArray, preB: FloatArray, w: Int, h: Int
   ): OrangeMask? {
+    val base = sampleFilmBaseColor(preR, preG, preB, w, h) ?: return null
+    return densitiesFromBase(base[0], base[1], base[2])
+  }
+
+  /**
+   * Shared film-base (rebate) colour sampler — the single source of truth for
+   * "where is the unexposed orange base and what colour is it", the Android twin
+   * of the iOS `sampleFilmBaseColor`.
+   *
+   * Walks a ~10% nearest-neighbour stride over the PRE-invert linear channels,
+   * collects the bright, orange-dominant candidates (R > G > B with margin,
+   * BT.601 luma > 120/255), and averages the 100 brightest. Returns the averaged
+   * base colour as a `floatArrayOf(r, g, b)` in normalized sRGB-encoded [0,1]
+   * (the domain the 0..255 thresholds use), or null when fewer than 100
+   * convincing base pixels exist.
+   *
+   * Used by BOTH [estimateMaskFromFilmBase] (orange-mask removal) and
+   * [estimateFilmBaseNeutral] (white-balance suggestion). Deterministic.
+   */
+  private fun sampleFilmBaseColor(
+    preR: FloatArray, preG: FloatArray, preB: FloatArray, w: Int, h: Int
+  ): FloatArray? {
     val n = w * h
     val targetSamples = max(1, (n * 0.1).toInt())
     val stride = max(1, n / targetSamples)
@@ -476,7 +537,7 @@ class AiImageProcessingModule : Module() {
     val avgG = samples.sumOf { it.g.toDouble() }.toFloat() / 100f
     val avgB = samples.sumOf { it.b.toDouble() }.toFloat() / 100f
 
-    return densitiesFromBase(avgR, avgG, avgB)
+    return floatArrayOf(avgR, avgG, avgB)
   }
 
   /**
@@ -781,6 +842,173 @@ class AiImageProcessingModule : Module() {
       val detail = (lum[i] - blur[i]) * amount
       r[i] += detail; g[i] += detail; b[i] += detail
     }
+  }
+
+  // MARK: Step 9 — LUT look (scaffold; identity NO-OP)
+
+  /**
+   * Apply a 3D-LUT colour "look" as the final colour stage of the pipeline.
+   *
+   * Scaffold only. Today this is an identity pass-through: an empty or
+   * unrecognised [lut] leaves the channels untouched, so existing behaviour is
+   * preserved bit-for-bit. The seam exists so the JS film-profiles can pass
+   * `ProcessParams.lut` (a bundled-LUT id or a .cube file URI) ahead of a real
+   * sampler landing here, mirroring the iOS applyLut.
+   *
+   * TODO(lut): implement real 3D-LUT sampling.
+   *   1. Resolve [lut]: a bundled id maps to a packaged .cube asset; a
+   *      file://-or-path loads that .cube. Parse the cube (size N, the N*N*N RGB
+   *      triplets, DOMAIN_MIN/MAX) once and cache it by id/URI.
+   *   2. For each pixel, map the (already tone-curved + adjusted) linear RGB to
+   *      a grid coordinate and TRILINEARLY interpolate the 8 surrounding LUT
+   *      nodes, writing the result back into r/g/b. This runs EXACTLY here —
+   *      after the tone curve + user adjustments, before the sRGB encode — so the
+   *      look is applied to the fully-corrected positive, matching iOS CIColorCube.
+   *   3. Keep the sampling domain (linear vs sRGB) aligned with iOS so the two
+   *      platforms agree on the look.
+   * Until then, callers may set [lut] freely with no visual effect.
+   */
+  private fun applyLut(r: FloatArray, g: FloatArray, b: FloatArray, lut: String) {
+    val id = lut.trim()
+    if (id.isEmpty()) return
+    // No bundled LUTs are registered yet and no .cube parser exists, so every
+    // value is "unknown" and this is a NO-OP. (Real sampling is TODO(lut) above.)
+    return
+  }
+
+  // MARK: - Film-base neutral white-balance suggestion
+
+  /**
+   * Derive a SUGGESTED white-balance correction from the unexposed film
+   * base/rebate. The Android twin of the iOS `estimateFilmBaseNeutral`; returns
+   * the `{warmth, tint, found}` map (matching `FilmBaseNeutral`).
+   *
+   * The decoded source is linearized first so the shared [sampleFilmBaseColor]
+   * reads the same pre-invert domain the pipeline uses. Mapping (deterministic;
+   * documented in PARITY.md):
+   *   - base colour (R,G,B) in sRGB-encoded [0,1]; null => found:false, 0/0.
+   *   - normalize by base luminance Y = 0.299R+0.587G+0.114B (exposure-independent).
+   *   - warmth = -clamp((R-B)/Y * kWarm). Orange base (R>B) => negative (cooler).
+   *   - tint   = +clamp((G-(R+B)/2)/Y * kTint). >0 when base leans green
+   *     (push magenta); <0 for a magenta base (push green), per
+   *     CITemperatureAndTint's tint sign.
+   */
+  private fun estimateFilmBaseNeutral(source: Bitmap): Map<String, Any> {
+    val w = source.width
+    val h = source.height
+    val n = w * h
+    if (n == 0) return mapOf("warmth" to 0.0, "tint" to 0.0, "found" to false)
+
+    val argb = IntArray(n)
+    source.getPixels(argb, 0, w, 0, 0, w, h)
+
+    // Linearize (sRGB -> linear), matching the pipeline's pre-invert channels.
+    val r = FloatArray(n)
+    val g = FloatArray(n)
+    val b = FloatArray(n)
+    for (i in 0 until n) {
+      val p = argb[i]
+      r[i] = srgbToLinear(((p shr 16) and 0xFF) / 255f)
+      g[i] = srgbToLinear(((p shr 8) and 0xFF) / 255f)
+      b[i] = srgbToLinear((p and 0xFF) / 255f)
+    }
+
+    val base = sampleFilmBaseColor(r, g, b, w, h)
+      ?: return mapOf("warmth" to 0.0, "tint" to 0.0, "found" to false)
+
+    val y = max(0.299f * base[0] + 0.587f * base[1] + 0.114f * base[2], 0.0001f)
+    val warmExcess = (base[0] - base[2]) / y                  // >=0 for an orange base
+    val greenBias = (base[1] - (base[0] + base[2]) / 2f) / y  // >0 => base leans green
+
+    val warmth = clampUnit(-warmExcess * BASE_WARMTH_GAIN)
+    val tint = clampUnit(greenBias * BASE_TINT_GAIN)
+
+    return mapOf("warmth" to warmth.toDouble(), "tint" to tint.toDouble(), "found" to true)
+  }
+
+  private fun clampUnit(v: Float): Float = if (v < -1f) -1f else if (v > 1f) 1f else v
+
+  // MARK: - Multi-shot denoise (averageFrames)
+
+  /**
+   * Decode N same-size frames and write their per-pixel MEAN as a JPEG.
+   *
+   * Reduces random sensor noise (~sqrt(N)). ASSUMES THE FRAMES ARE ALREADY
+   * pixel-aligned — no registration is performed (handheld bursts ghost;
+   * alignment is a documented TODO). If the frames are not all the same pixel
+   * size, or fewer than 2 URIs are supplied, the FIRST frame is returned
+   * unchanged (re-encoded to the cache so the return shape is consistent).
+   *
+   * Memory-light: holds a single IntArray running sum (R/G/B/count packed as
+   * Int sums in three IntArrays) plus AT MOST one decoded frame at a time. It
+   * never materialises N float buffers — each frame is decoded, added to the
+   * sums via getPixels into a reused IntArray, then recycled before the next.
+   */
+  private fun averageFrames(uris: List<String>): Map<String, Any> {
+    if (uris.isEmpty()) throw ImageNotFoundException()
+
+    val first = decodeBitmap(uris[0]) ?: throw ImageNotFoundException()
+    val w = first.width
+    val h = first.height
+    val n = w * h
+
+    // N < 2 -> nothing to average; return the first frame unchanged.
+    if (uris.size < 2 || n == 0) {
+      val uri = writeJpeg(first)
+      first.recycle()
+      return mapOf("uri" to uri, "width" to w, "height" to h)
+    }
+
+    // Per-channel running sums in Int (255 * N stays within Int for any realistic
+    // N) plus one reusable pixel buffer. Only these + one frame are ever held.
+    val sumR = IntArray(n)
+    val sumG = IntArray(n)
+    val sumB = IntArray(n)
+    val px = IntArray(n)
+
+    fun accumulate(bmp: Bitmap) {
+      bmp.getPixels(px, 0, w, 0, 0, w, h)
+      for (i in 0 until n) {
+        val p = px[i]
+        sumR[i] += (p shr 16) and 0xFF
+        sumG[i] += (p shr 8) and 0xFF
+        sumB[i] += p and 0xFF
+      }
+    }
+
+    accumulate(first)
+    first.recycle()
+    var counted = 1
+
+    for (idx in 1 until uris.size) {
+      val frame = decodeBitmap(uris[idx])
+      if (frame == null || frame.width != w || frame.height != h) {
+        // Unreadable or size mismatch -> return the first image unchanged
+        // (documented contract). Re-decode the first frame for a clean output.
+        frame?.recycle()
+        val fallback = decodeBitmap(uris[0]) ?: throw ImageNotFoundException()
+        val uri = writeJpeg(fallback)
+        fallback.recycle()
+        return mapOf("uri" to uri, "width" to w, "height" to h)
+      }
+      accumulate(frame)
+      frame.recycle()
+      counted += 1
+    }
+
+    // Divide the running sums by the frame count to get the mean, pack to ARGB.
+    val out = IntArray(n)
+    for (i in 0 until n) {
+      val rr = sumR[i] / counted
+      val gg = sumG[i] / counted
+      val bb = sumB[i] / counted
+      out[i] = (0xFF shl 24) or (rr shl 16) or (gg shl 8) or bb
+    }
+    val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    result.setPixels(out, 0, w, 0, 0, w, h)
+    val uri = writeJpeg(result)
+    result.recycle()
+    return mapOf("uri" to uri, "width" to w, "height" to h)
   }
 
   // MARK: - Histogram (HistogramAnalyzer port)

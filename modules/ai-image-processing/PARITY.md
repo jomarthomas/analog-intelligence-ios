@@ -18,12 +18,13 @@ Anything marked **⚠ verify on device** needs a visual A/B check on real hardwa
 
 ## API surface — exact parity ✅
 
-Both register `Name("AiImageProcessing")` and expose the same four async methods
-with identical record shapes (`ProcessParams`, `UserAdjustParams`) and return
-shapes (`{uri,width,height}`, `Histogram`, `FrameDetectionResult`), matching
-`src/AiImageProcessing.types.ts`. The `ProcessParams` record gained one optional
-field this round, `maxDimension: Double = 0` (≤ 0 ⇒ full res), present on both
-the Swift and Kotlin records; `mode` now also accepts `"slide"`.
+Both register `Name("AiImageProcessing")` and expose the same **six** async
+methods with identical record shapes (`ProcessParams`, `UserAdjustParams`) and
+return shapes (`{uri,width,height}`, `Histogram`, `FrameDetectionResult`,
+`FilmBaseNeutral`), matching `src/AiImageProcessing.types.ts`. The
+`ProcessParams` record gained one optional field this round, `lut: String = ""`
+(empty/unknown ⇒ NO-OP), present on both the Swift and Kotlin records (it earlier
+also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 
 | Method | iOS | Android |
 |---|---|---|
@@ -31,6 +32,8 @@ the Swift and Kotlin records; `mode` now also accepts `"slide"`.
 | `analyzeHistogram(uri)` | ✅ | ✅ |
 | `applyUserAdjustments(baseUri, params)` | ✅ | ✅ |
 | `detectFilmFrame(uri)` | ✅ | ✅ |
+| `estimateFilmBaseNeutral(uri)` → `{warmth, tint, found}` | ✅ | ✅ |
+| `averageFrames(uris)` → `{uri, width, height}` | ✅ | ✅ |
 
 ## Pipeline stage parity (`processNegative`)
 
@@ -46,6 +49,7 @@ the Swift and Kotlin records; `mode` now also accepts `"slide"`.
 | 7. User adjustments | shared Core Image graph (see below) | shared `applyAdjustmentChannels` (see below) | ✅ shared per platform |
 | B&W | `CIColorControls` saturation 0 *(`bw` only; slide stays colour)* | collapse to BT.709 luma *(`bw` only; slide stays colour)* | ✅ both grayscale |
 | 8. Sharpen | `CISharpenLuminance` | 3×3 luminance unsharp mask | **approx** |
+| 9. LUT look (`lut`, optional) | `applyLut` — identity NO-OP scaffold (empty/unknown ⇒ unchanged); `TODO(lut)` documents the `CIColorCube` slot | `applyLut` — identity NO-OP scaffold (empty/unknown ⇒ unchanged); `TODO(lut)` documents the trilinear-sample slot | ✅ both NO-OP today; same seam, runs after tone curve + adjustments, before encode |
 | encode | linear→sRGB output color space | `linearToSrgb` | ✅ equivalent |
 
 `analyzeHistogram` is an exact match: 256 bins/channel, BT.709 luma, bottom/top-5%
@@ -122,6 +126,105 @@ algorithmic parity (see the stage table + the two subsections above):
    tonal drift between preview and commit is expected and acceptable, as with the
    existing Adjust-screen fast path).
 
+## Film-engine extensions (this round): film-base neutral, LUT seam, averageFrames
+
+Three additive features, implemented on **both** platforms in algorithmic parity.
+None changes any existing output: `processNegative` with no `lut` is byte-for-byte
+unchanged, and the two new methods are independent entry points.
+
+### 1. `estimateFilmBaseNeutral(uri) → { warmth, tint, found }`
+
+A one-tap **"neutralize from film base"** suggestion. Both platforms refactored the
+existing brightest-orange film-base logic into a shared sampler
+(`sampleFilmBaseColor`) used by **both** the orange-mask estimator and this new
+method, so the two features agree on the base region:
+
+- **iOS** linearizes the input, renders a 10% Lanczos downsample to sRGB bytes,
+  and averages the **100 brightest** orange-base pixels (`R>G+10`, `G>B+5`,
+  `luma>120` on 0–255).
+- **Android** linearizes the decoded bitmap and walks a ~10% nearest-neighbour
+  stride over the pre-invert channels with the **same** thresholds, averaging the
+  same 100 brightest.
+
+Both return the averaged base colour `(R,G,B)` in sRGB-encoded [0,1]; if fewer than
+100 convincing base pixels exist (B&W mis-tag, borderless crop, no rebate) they
+return **`found: false`** with `warmth = tint = 0` and the UI leaves the sliders
+untouched. **Deterministic** — same image ⇒ same suggestion.
+
+**Base-RGB → warmth/tint mapping** (identical on both platforms, gains
+`kBaseWarmthGain = 1.5`, `kBaseTintGain = 2.0`):
+
+```
+Y          = 0.299·R + 0.587·G + 0.114·B            (base luminance; clamped ≥ 1e-4)
+warmExcess = (R − B) / Y                            (≥ 0 for a normal orange base)
+greenBias  = (G − (R + B)/2) / Y                    (> 0 ⇒ base leans green)
+
+warmth     = clamp(−warmExcess · 1.5,  −1, +1)      (NEGATIVE = cooler, counters the warm base)
+tint       = clamp( greenBias  · 2.0,  −1, +1)      (sign per CITemperatureAndTint: + = magenta, − = green)
+```
+
+These are in the **same units the existing `warmth` slider uses** (it maps to a
+4500–8500 K colour temperature via `CITemperatureAndTint`, neutral `6500 + warmth·2000`),
+so the result can be fed straight into `ProcessParams.warmth` / a future tint slider
+or used to seed `applyUserAdjustments`. The values describe the correction to
+*apply* (to neutralise the base), not the base colour itself. A colour-negative
+base is warm/orange, so `warmth` is normally negative.
+
+> **⚠ verify on device:** that the suggested warmth/tint actually neutralise a real
+> C-41 frame's cast when applied (the mapping is a deterministic heuristic, not a
+> rigorous chromatic-adaptation transform). The two gains (1.5 / 2.0) and the
+> normalize-by-Y choice are conservative first estimates and will likely want tuning
+> against real captures. Also confirm iOS and Android suggest *close* values on the
+> same negative — the only divergence source is the shared sampler's
+> Lanczos-vs-nearest-neighbour downsample (same caveat as the orange mask).
+
+### 2. LUT hook scaffold (`ProcessParams.lut?`, `applyLut` stage)
+
+`ProcessParams` gains an optional `lut?: string` (bundled-LUT id or `.cube` file
+URI). A new **Step 9 `applyLut`** stage runs as the final colour stage — after the
+tone curve + user adjustments, **before** the sRGB encode — on **both** platforms.
+It is an **identity NO-OP today**: an unset/empty/unrecognised `lut` returns the
+image unchanged, so current behaviour is fully preserved. `index.ts` defaults the
+field to `""`. Each platform carries a `TODO(lut)` describing exactly how a real
+3-D LUT sampler slots in (iOS `CIColorCube` / `CIColorCubeWithColorSpace`; Android
+trilinear interpolation over a parsed cube), sampled at this same point. **No real
+`.cube` parsing is implemented** — this is only the seam so the JS film-profiles can
+start passing a `lut` later.
+
+> **⚠ verify on device** (only once a real sampler lands): that the chosen sampling
+> domain (linear vs sRGB) matches between platforms. Today there is nothing to
+> verify visually — the stage is provably a pass-through.
+
+### 3. `averageFrames(uris) → ProcessResult` (multi-shot denoise)
+
+Decodes N same-size frames and outputs their **per-pixel mean**, reducing random
+sensor noise by ≈ √N — a phone take on SilverFast Multi-Exposure.
+
+- **iOS** renders each frame to an sRGB RGBA8 bitmap and accumulates into a single
+  `[UInt32]` running sum (via a `withUnsafeMutableBytes`-bound `CGContext`), then
+  divides once and builds the output `CGImage`.
+- **Android** is **memory-light**: it holds three `IntArray` running sums plus a
+  single reused pixel buffer and **at most one decoded frame at a time** — each
+  frame is `getPixels`-accumulated then recycled before the next, so it never
+  materialises N float/bitmap buffers. (255·N fits in `Int`/`UInt32` for any
+  realistic N.)
+
+If the frames are **not all the same pixel size**, or **N < 2**, the **first** image
+is returned unchanged (re-encoded to the cache, so the return shape is always a
+fresh `ProcessResult`).
+
+> **IMPORTANT — alignment limitation (documented TODO):** `averageFrames` performs
+> **NO image alignment**. It assumes the frames are **already pixel-aligned** (tripod
+> / copy-stand, or pre-registered upstream). **Handheld bursts will ghost/blur** —
+> registering them (feature-matching / homography) is intentionally out of scope and
+> is a tracked TODO in both sources and the JS doc.
+>
+> **⚠ verify on device:** noise reduction on a set of aligned tripod frames (expect a
+> visibly cleaner result, ≈ √N), and confirm the size-mismatch / N<2 fallbacks return
+> the first frame intact. A JPEG round-trip on each decode adds a little of its own
+> noise on iOS (frames are re-rendered through Core Image); if maximum denoise quality
+> matters, prefer feeding losslessly-decoded sources.
+
 ## Fixed in this audit
 
 1. **Adjust-screen preview now uses the same color space as commit on Android.**
@@ -165,6 +268,13 @@ algorithmic parity (see the stage table + the two subsections above):
 - **Filter approximations** — highlights/shadows, warmth (temperature→per-channel
   scale), vibrance, and sharpen have no exact framework twin on Android and use the
   documented approximations above. Expect small tonal differences, not structural ones.
+- **`lut` (LUT look)** — scaffold only; both platforms are an identity NO-OP until a
+  real `.cube` sampler lands (`TODO(lut)` in both sources). Setting `lut` has no visual
+  effect today by design.
+- **`averageFrames` alignment** — neither platform aligns the input frames; both assume
+  pre-aligned (tripod) frames. Handheld bursts ghost. Registration is a tracked TODO.
+  iOS re-renders each frame through Core Image (a JPEG-decode → CIImage round-trip),
+  Android accumulates decoded ARGB pixels directly; both compute the same per-pixel mean.
 
 ## Tone / color-space notes worth a device A/B (not bugs)
 

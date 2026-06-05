@@ -6,6 +6,7 @@ import type {
   ProcessResult,
   UserAdjustParams,
   FrameDetectionResult,
+  FilmBaseNeutral,
 } from './AiImageProcessing.types';
 
 /**
@@ -26,6 +27,11 @@ export interface AiImageProcessingNativeModule {
     params: Required<UserAdjustParams>,
   ): Promise<ProcessResult>;
   detectFilmFrame(uri: string): Promise<FrameDetectionResult>;
+  // Film-engine extensions — additive:
+  /** Suggest a white-balance correction from the unexposed film base/rebate. */
+  estimateFilmBaseNeutral(uri: string): Promise<FilmBaseNeutral>;
+  /** Multi-shot denoise: per-pixel mean of N already-aligned same-size frames. */
+  averageFrames(uris: string[]): Promise<ProcessResult>;
 }
 
 // `requireNativeModule` is re-exported from `expo` in SDK 56 (the convention

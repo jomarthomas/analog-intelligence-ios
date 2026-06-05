@@ -26,6 +26,14 @@
  *   - `applyUserAdjustments` — fast path for live Adjust-screen preview.
  *   - `detectFilmFrame`      — automatic frame/crop detection (Vision on iOS).
  *   - `ExportFormat`         — 'jpeg' | 'heic' | 'dng' (dng throws on Android).
+ *
+ * Film-engine extensions (additive):
+ *   - `estimateFilmBaseNeutral` — suggest a white-balance correction from the
+ *     unexposed film base/rebate (one-tap "neutralize from film base").
+ *   - `averageFrames`           — multi-shot denoise (per-pixel mean of N
+ *     already-aligned frames; a phone take on SilverFast Multi-Exposure).
+ *   - `ProcessParams.lut`       — optional LUT selector; native `applyLut`
+ *     stage is currently an identity NO-OP scaffold (see `TODO(lut)`).
  */
 import AiImageProcessingModule from './src/AiImageProcessingModule';
 import type {
@@ -34,6 +42,7 @@ import type {
   ProcessResult,
   UserAdjustParams,
   FrameDetectionResult,
+  FilmBaseNeutral,
 } from './src/AiImageProcessing.types';
 
 export type {
@@ -46,6 +55,8 @@ export type {
   FramePoint,
   FrameDetectionResult,
   ExportFormat,
+  // Film-engine extensions:
+  FilmBaseNeutral,
 } from './src/AiImageProcessing.types';
 
 // ---------------------------------------------------------------------------
@@ -73,6 +84,8 @@ function withDefaults(params: ProcessParams): Required<ProcessParams> {
     highlights: params.highlights ?? 0,
     shadows: params.shadows ?? 0,
     vibrance: params.vibrance ?? 0,
+    // "" ⇒ "unset" — native `applyLut` treats empty/unknown as a NO-OP.
+    lut: params.lut ?? '',
   };
 }
 
@@ -180,9 +193,61 @@ export async function detectFilmFrame(uri: string): Promise<FrameDetectionResult
   return AiImageProcessingModule.detectFilmFrame(uri);
 }
 
+// ---------------------------------------------------------------------------
+// Film-engine extensions
+// ---------------------------------------------------------------------------
+
+/**
+ * Suggest a white-balance correction from the **unexposed film base/rebate**.
+ *
+ * Samples the brightest, most-saturated-orange region of the source (the
+ * max-density film base — the same region the orange-mask estimator prefers)
+ * and returns a SUGGESTED correction in the app's existing slider units:
+ * `warmth` (−1…+1; typically negative to cool a warm/orange base) and `tint`
+ * (−1…+1 green↔magenta), plus `found`. This powers a one-tap "neutralize from
+ * film base" button — feed the result into {@link ProcessParams.warmth} (and a
+ * future tint slider) or seed {@link applyUserAdjustments}.
+ *
+ * Deterministic. When no clear base is found, `found` is `false` and both
+ * `warmth` and `tint` are 0 (leave the sliders untouched). The exact
+ * base-RGB → warmth/tint mapping is documented in `PARITY.md`.
+ *
+ * @param uri `file://` (or platform-readable) URI of the captured negative —
+ *   pass the **raw, pre-processing** frame so the orange rebate is still visible.
+ */
+export async function estimateFilmBaseNeutral(uri: string): Promise<FilmBaseNeutral> {
+  return AiImageProcessingModule.estimateFilmBaseNeutral(uri);
+}
+
+/**
+ * Multi-shot denoise — output the **per-pixel mean** of N same-size frames.
+ *
+ * Averaging several exposures of the same static subject reduces random sensor
+ * (read/shot) noise by roughly √N — a phone take on SilverFast's Multi-Exposure
+ * scanning. The frames are decoded, summed per channel, and divided by N.
+ *
+ * **IMPORTANT — alignment limitation.** This performs NO image alignment: it
+ * assumes the frames are **already pixel-aligned** (e.g. captured on a tripod
+ * or copy-stand, or pre-registered upstream). Handheld bursts will ghost/blur
+ * because they are not registered. Aligning handheld frames (feature-matching /
+ * homography) is a documented TODO and is intentionally out of scope here.
+ *
+ * If the frames are **not all the same pixel size**, or fewer than **2** URIs
+ * are supplied, the **first** image is returned unchanged (re-encoded to the
+ * cache, so the return shape is always a fresh {@link ProcessResult}).
+ *
+ * @param uris Ordered list of `file://` (or platform-readable) URIs to average.
+ *   All must decode to the same width/height for averaging to occur.
+ */
+export async function averageFrames(uris: string[]): Promise<ProcessResult> {
+  return AiImageProcessingModule.averageFrames(uris);
+}
+
 export default {
   processNegative,
   analyzeHistogram,
   applyUserAdjustments,
   detectFilmFrame,
+  estimateFilmBaseNeutral,
+  averageFrames,
 };

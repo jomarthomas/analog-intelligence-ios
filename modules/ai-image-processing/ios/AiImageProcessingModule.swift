@@ -67,6 +67,9 @@ internal struct ProcessParams: Record {
   @Field var highlights: Double = 0
   @Field var shadows: Double = 0
   @Field var vibrance: Double = 0
+  // Optional LUT selector (bundled-LUT id or .cube file URI). Empty/unknown ⇒
+  // the `applyLut` stage is a NO-OP (identity). See TODO(lut) in runPipeline.
+  @Field var lut: String = ""
 }
 
 // MARK: - UserAdjustParams record (mirrors src/AiImageProcessing.types.ts UserAdjustParams)
@@ -182,6 +185,35 @@ public class AiImageProcessingModule: Module {
       }
       return try self.detectFilmFrameVision(image: image)
     }
+
+    // MARK: estimateFilmBaseNeutral(uri) -> { warmth, tint, found }
+    //
+    // Sample the unexposed film base/rebate (the brightest orange max-density
+    // region, via the shared `sampleFilmBaseColor`) and return a SUGGESTED
+    // white-balance correction in the app's slider units. Powers a one-tap
+    // "neutralize from film base" button. Reads the RAW pre-processing frame
+    // (orientation applied), the same pixels the inversion would consume.
+    AsyncFunction("estimateFilmBaseNeutral") { (uri: String) -> [String: Any] in
+      guard let input = self.loadCIImage(from: uri) else {
+        throw ImageNotFoundException()
+      }
+      // Match the pipeline's pre-invert domain: linearize, then sample. The
+      // sampler renders to sRGB bytes internally for its 0–255 thresholds, so
+      // this mirrors the pipeline's film-base read exactly.
+      let linear = self.linearize(input)
+      return self.estimateFilmBaseNeutral(preInvert: linear)
+    }
+
+    // MARK: averageFrames(uris) -> { uri, width, height }
+    //
+    // Multi-shot denoise: decode N same-size frames and output their per-pixel
+    // MEAN (≈ √N sensor-noise reduction — a phone take on SilverFast
+    // Multi-Exposure). If sizes differ or N < 2, the first frame is returned
+    // unchanged. ASSUMES THE FRAMES ARE ALREADY ALIGNED — no registration is
+    // performed here (handheld bursts will ghost; alignment is a documented TODO).
+    AsyncFunction("averageFrames") { (uris: [String]) -> [String: Any] in
+      return try self.averageFrames(uris: uris)
+    }
   }
 
   // MARK: - Input loading
@@ -271,6 +303,12 @@ public class AiImageProcessingModule: Module {
     // Step 8 — Sharpen. ImageProcessor.applySharpen → CISharpenLuminance.
     image = sharpen(image: image, amount: Float(params.sharpen))
 
+    // Step 9 — LUT "look" (film-emulation). Identity NO-OP scaffold today; see
+    // applyLut for the TODO(lut) wiring of a real 3D-LUT sampler. Runs as the
+    // final colour stage, AFTER the tone curve + user adjustments and BEFORE
+    // the sRGB encode, so a future `.cube` is sampled on the corrected positive.
+    image = applyLut(image: image, lut: params.lut)
+
     // Convert back to sRGB for display/export.
     // NOTE: ImageProcessor names this `convertToSRGB` but applies
     // CISRGBToneCurveToLinear — we honour the *intent* (encode for sRGB output)
@@ -278,6 +316,38 @@ public class AiImageProcessingModule: Module {
     // at render time. We mirror the legacy filter call for parity.
     image = encodeForSRGB(image)
 
+    return image
+  }
+
+  // MARK: Step 9 — LUT look (scaffold; identity NO-OP)
+
+  /// Apply a 3D-LUT colour "look" as the final colour stage of the pipeline.
+  ///
+  /// **Scaffold only.** Today this is an identity pass-through: an empty or
+  /// unrecognised `lut` returns `image` unchanged, so existing behaviour is
+  /// byte-for-byte preserved. The seam exists so the JS film-profiles can pass
+  /// `ProcessParams.lut` (a bundled-LUT id or a `.cube` file URI) ahead of a
+  /// real sampler landing here.
+  ///
+  /// TODO(lut): implement real 3D-LUT sampling.
+  ///   1. Resolve `lut`: a bundled id → a packaged `.cube` in the app bundle; a
+  ///      `file://`/path → load that `.cube`. Parse the cube (size N, the
+  ///      N·N·N RGB triplets, plus DOMAIN_MIN/MAX) into a Data buffer laid out
+  ///      as Core Image expects: BGRA Float32, R fastest-varying.
+  ///   2. Feed it to `CIColorCube` (or `CIColorCubeWithColorSpace`, passing
+  ///      `workingColorSpace` so the LUT is sampled in this pipeline's linear
+  ///      space) with `inputCubeDimension = N` and `inputCubeData = buffer`.
+  ///      That filter slots in EXACTLY here — after the tone curve + user
+  ///      adjustments, before `encodeForSRGB` — so the look is applied to the
+  ///      fully-corrected positive, matching how a desktop scanner applies a
+  ///      film LUT last. Cache parsed cubes by id/URI to avoid re-parsing.
+  ///   3. Mirror the same resolution + sampling on Android (see its applyLut).
+  /// Until then, callers may set `lut` freely with no visual effect.
+  private func applyLut(image: CIImage, lut: String) -> CIImage {
+    let id = lut.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !id.isEmpty else { return image }
+    // No bundled LUTs are registered yet and no .cube parser exists, so every
+    // value is "unknown" → identity. (Real lookup/sampling is TODO(lut) above.)
     return image
   }
 
@@ -448,7 +518,30 @@ public class AiImageProcessingModule: Module {
   /// Sample the brightest, most-saturated-orange region of the PRE-invert image
   /// (the film base). Returns nil if no convincing orange base is present so the
   /// caller can fall back to the legacy dark-region method.
+  ///
+  /// This is the orange-mask consumer of the shared `sampleFilmBaseColor`
+  /// sampler; it forwards the averaged base colour into the unchanged
+  /// `densitiesFromBase` density derivation so the removal math is identical.
   private func estimateMaskFromFilmBase(preInvert: CIImage) -> OrangeMask? {
+    guard let base = sampleFilmBaseColor(preInvert: preInvert) else { return nil }
+    return densitiesFromBase(baseR: base.r, baseG: base.g, baseB: base.b)
+  }
+
+  /// Shared film-base (rebate) colour sampler — the single source of truth for
+  /// "where is the unexposed orange base and what colour is it".
+  ///
+  /// Downsamples the PRE-invert image to 10% (Lanczos), collects the bright,
+  /// orange-dominant candidates (R > G > B with margin, luminance > 120/255 —
+  /// the base is the brightest part of a colour negative), and averages the
+  /// **100 brightest** such pixels. Returns the averaged base colour in
+  /// normalized sRGB-encoded [0,1] (the same domain the 0–255 thresholds use),
+  /// or nil when fewer than 100 convincing base pixels exist (non-orange scene,
+  /// B&W mis-tag, or a borderless crop with no rebate).
+  ///
+  /// Used by BOTH `estimateMaskFromFilmBase` (orange-mask removal) and
+  /// `estimateFilmBaseNeutral` (white-balance suggestion) so the two features
+  /// agree on the base region. Deterministic.
+  private func sampleFilmBaseColor(preInvert: CIImage) -> (r: Float, g: Float, b: Float)? {
     let extent = preInvert.extent
     guard extent.width > 0, extent.height > 0 else { return nil }
 
@@ -500,7 +593,7 @@ public class AiImageProcessingModule: Module {
     let avgG = samples.map { $0.g }.reduce(0, +) / count
     let avgB = samples.map { $0.b }.reduce(0, +) / count
 
-    return densitiesFromBase(baseR: avgR, baseG: avgG, baseB: avgB)
+    return (avgR, avgG, avgB)
   }
 
   /// Legacy fallback — port of OrangeMaskEstimator.estimateOrangeMask:
@@ -987,6 +1080,156 @@ public class AiImageProcessingModule: Module {
 
   private func notFoundResult() -> [String: Any] {
     return ["found": false, "confidence": 0.0]
+  }
+
+  // MARK: - Film-base neutral white-balance suggestion
+
+  /// Tuning constants for the base-RGB → warmth/tint mapping. Conservative
+  /// first estimates — see PARITY.md (the suggestion is intentionally gentle,
+  /// and these gains may want tuning against real C-41 captures on device).
+  private static let kBaseWarmthGain: Float = 1.5
+  private static let kBaseTintGain: Float = 2.0
+
+  /// Derive a SUGGESTED white-balance correction from the unexposed film
+  /// base/rebate sampled on the PRE-invert linear image. Returns the result
+  /// dictionary `{warmth, tint, found}` directly (matching `FilmBaseNeutral`).
+  ///
+  /// Mapping (deterministic; documented in PARITY.md):
+  ///   - Sample the base colour `(R,G,B)` in sRGB-encoded [0,1] via the shared
+  ///     `sampleFilmBaseColor`. nil ⇒ `found:false`, warmth/tint 0.
+  ///   - Normalize by the base luminance `Y = 0.299R+0.587G+0.114B` so the
+  ///     suggestion is exposure-independent.
+  ///   - warmth = −clamp((R−B)/Y · kWarm, −1, +1). A colour-negative base is
+  ///     warm/orange (R>B), so the correction is negative (cooler) to counter it.
+  ///   - tint   = +clamp((G − (R+B)/2)/Y · kTint, −1, +1). Positive when the
+  ///     base leans green (push toward magenta); negative for a magenta base
+  ///     (push toward green) — matching CITemperatureAndTint's tint sign.
+  private func estimateFilmBaseNeutral(preInvert: CIImage) -> [String: Any] {
+    guard let base = sampleFilmBaseColor(preInvert: preInvert) else {
+      return ["warmth": 0.0, "tint": 0.0, "found": false]
+    }
+    let y = max(0.299 * base.r + 0.587 * base.g + 0.114 * base.b, 0.0001)
+
+    let warmExcess = (base.r - base.b) / y                 // ≥0 for an orange base
+    let greenBias  = (base.g - (base.r + base.b) / 2) / y   // >0 ⇒ base leans green
+
+    func clamp1(_ v: Float) -> Float { min(1, max(-1, v)) }
+    let warmth = clamp1(-warmExcess * Self.kBaseWarmthGain)
+    let tint   = clamp1(greenBias * Self.kBaseTintGain)
+
+    return ["warmth": Double(warmth), "tint": Double(tint), "found": true]
+  }
+
+  // MARK: - Multi-shot denoise (averageFrames)
+
+  /// Decode N same-size frames and write their per-pixel MEAN as a JPEG.
+  ///
+  /// Reduces random sensor noise (≈ √N). **Assumes the frames are already
+  /// pixel-aligned** — no registration is performed (handheld bursts ghost;
+  /// alignment is a documented TODO). If the frames are not all the same pixel
+  /// size, or fewer than 2 URIs are given, the FIRST frame is returned
+  /// unchanged (re-encoded to the cache so the return shape is consistent).
+  ///
+  /// Accumulates per-channel sums in a `[UInt32]` buffer (255·N stays well
+  /// within UInt32 for any realistic N) and divides once at the end — only the
+  /// running sum plus one frame's bitmap are held at a time.
+  private func averageFrames(uris: [String]) throws -> [String: Any] {
+    guard let firstUri = uris.first else { throw ImageNotFoundException() }
+
+    // Render the first frame; it defines the target size and is the N<2 /
+    // size-mismatch fallback.
+    guard let firstImage = loadCIImage(from: firstUri),
+          let firstCG = ciContext.createCGImage(firstImage, from: firstImage.extent) else {
+      throw ImageNotFoundException()
+    }
+    let width = firstCG.width
+    let height = firstCG.height
+    let n = width * height
+
+    // N < 2 → nothing to average; return the first frame unchanged.
+    if uris.count < 2 || n == 0 {
+      let uri = try writeJPEG(cgImage: firstCG, quality: 0.95)
+      return ["uri": uri, "width": width, "height": height]
+    }
+
+    let rowBytes = width * 4
+    var sum = [UInt32](repeating: 0, count: n * 4)
+    var scratch = [UInt8](repeating: 0, count: n * 4)
+
+    // Accumulate a single CGImage's pixels into `sum` (sRGB RGBA8). The bitmap
+    // is drawn into `scratch` via a CGContext whose backing pointer must stay
+    // valid for the whole draw, so we bind it with `withUnsafeMutableBytes`
+    // (passing a transient `&scratch` would dangle after the initializer).
+    func accumulate(_ cg: CGImage) {
+      guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return }
+      scratch.withUnsafeMutableBytes { raw in
+        guard let baseAddr = raw.baseAddress,
+              let ctx = CGContext(
+                data: baseAddr,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: rowBytes,
+                space: cs,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let bytes = raw.bindMemory(to: UInt8.self)
+        for i in 0..<(n * 4) { sum[i] += UInt32(bytes[i]) }
+      }
+    }
+
+    accumulate(firstCG)
+    var counted = 1
+
+    for uri in uris.dropFirst() {
+      guard let img = loadCIImage(from: uri),
+            let cg = ciContext.createCGImage(img, from: img.extent) else {
+        // Unreadable frame → size mismatch with the contract's "same-size"
+        // requirement; bail out to the unchanged-first-frame fallback.
+        let outUri = try writeJPEG(cgImage: firstCG, quality: 0.95)
+        return ["uri": outUri, "width": width, "height": height]
+      }
+      if cg.width != width || cg.height != height {
+        // Sizes differ → return the first image unchanged (documented contract).
+        let outUri = try writeJPEG(cgImage: firstCG, quality: 0.95)
+        return ["uri": outUri, "width": width, "height": height]
+      }
+      accumulate(cg)
+      counted += 1
+    }
+
+    // Divide the running sum by the frame count to get the mean, pack to RGBA8.
+    var mean = [UInt8](repeating: 0, count: n * 4)
+    let divisor = UInt32(counted)
+    for i in 0..<n {
+      let o = i * 4
+      mean[o]     = UInt8(sum[o]     / divisor)
+      mean[o + 1] = UInt8(sum[o + 1] / divisor)
+      mean[o + 2] = UInt8(sum[o + 2] / divisor)
+      mean[o + 3] = 255
+    }
+
+    guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let provider = CGDataProvider(data: Data(mean) as CFData),
+          let meanCG = CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: rowBytes,
+            space: cs,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+          ) else {
+      throw ImageRenderFailedException()
+    }
+
+    let uri = try writeJPEG(cgImage: meanCG, quality: 0.95)
+    return ["uri": uri, "width": width, "height": height]
   }
 
   // MARK: - Output
