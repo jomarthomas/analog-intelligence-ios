@@ -39,11 +39,13 @@ export type GalleryDetailViewProps = {
   imageId: string;
   /** Navigate into the Adjust screen for this frame. */
   onReadjust: (imageId: string) => void;
+  /** Open the dust/scratch retouch tool for this (processed) frame. */
+  onRetouch: (imageId: string) => void;
   /** Pop back to the gallery list. */
   onBack: () => void;
 };
 
-export function GalleryDetailView({ imageId, onReadjust, onBack }: GalleryDetailViewProps) {
+export function GalleryDetailView({ imageId, onReadjust, onRetouch, onBack }: GalleryDetailViewProps) {
   const theme = useTheme();
   const { height: windowHeight } = useWindowDimensions();
 
@@ -178,6 +180,14 @@ export function GalleryDetailView({ imageId, onReadjust, onBack }: GalleryDetail
           <Button variant="secondary" onPress={() => onReadjust(imageId)} style={styles.actionButton}>
             {image.isProcessed ? 'Re-adjust' : 'Adjust'}
           </Button>
+          {image.isProcessed && (
+            <Button
+              variant="secondary"
+              onPress={() => onRetouch(imageId)}
+              style={styles.actionButton}>
+              Retouch
+            </Button>
+          )}
           <Button onPress={handleExport} style={styles.actionButton}>
             Export
           </Button>

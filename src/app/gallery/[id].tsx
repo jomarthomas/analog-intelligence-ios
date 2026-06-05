@@ -36,6 +36,7 @@ export default function GalleryDetailScreen() {
       <GalleryDetailView
         imageId={id}
         onReadjust={(imageId) => router.push(`/adjust/${imageId}`)}
+        onRetouch={(imageId) => router.push(`/retouch/${imageId}`)}
         onBack={() => router.back()}
       />
     </Screen>
