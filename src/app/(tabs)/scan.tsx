@@ -387,8 +387,9 @@ export default function ScanScreen() {
           onStopRollScan={dockStopRollScan}
           onDisconnect={() => void dockDisconnect()}
         />
-      ) : (
-        /* Dev shortcut: connect simulated dock when none is connected */
+      ) : __DEV__ ? (
+        /* Dev-only shortcut (hidden in production): connect a simulated dock.
+           Real dock pairing lives in Settings › Developer. */
         <View style={styles.dockConnectRow}>
           <TouchableOpacity
             style={[styles.connectBtn, isConnecting && styles.connectBtnDisabled]}
@@ -401,7 +402,7 @@ export default function ScanScreen() {
             </Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
 
       {/* Free-tier sponsored banner (renders null for Pro). */}
       <BannerAd />

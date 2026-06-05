@@ -193,7 +193,7 @@ export type ContactSheetOptions = {
   cellWidth?: number;
   /** Pixel height of each cell. Default: 300. */
   cellHeight?: number;
-  /** Background colour of the sheet. Default: '#141418' (dark). */
+  /** Background colour of the sheet. Default: '#000000' (dark). */
   backgroundColor?: string;
   /** Whether to draw 1-based frame numbers below each thumbnail. Default: true. */
   showFrameNumbers?: boolean;
@@ -209,7 +209,7 @@ function normaliseOptions(opts: ContactSheetOptions): NormalisedSheetOptions {
     padding: opts.padding ?? 16,
     cellWidth: opts.cellWidth ?? 400,
     cellHeight: opts.cellHeight ?? 300,
-    backgroundColor: opts.backgroundColor ?? '#141418',
+    backgroundColor: opts.backgroundColor ?? '#000000',
     showFrameNumbers: opts.showFrameNumbers ?? true,
     jpegQuality: opts.jpegQuality ?? 90,
   };
@@ -309,7 +309,7 @@ export async function buildContactSheet(
     } else {
       // Draw a placeholder rectangle for missing/failed thumbnails.
       const placeholderPaint = Skia.Paint();
-      placeholderPaint.setColor(Skia.Color('#2C2C38'));
+      placeholderPaint.setColor(Skia.Color('#171717'));
       canvas.drawRect(
         Skia.XYWHRect(cellX, cellY, cellWidth, cellHeight),
         placeholderPaint,

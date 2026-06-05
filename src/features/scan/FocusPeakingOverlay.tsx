@@ -52,7 +52,7 @@ function peakingFillColor(color: PeakingColorType): string {
     case 'white':
       return 'rgba(255, 255, 255, 0.60)';
     default:
-      // Warm amber — primary theme colour (Palette.ink = #FF9933 at 60% alpha)
+      // White peaking overlay (Palette.ink) at 60% alpha — sits over the dark camera.
       return 'rgba(255, 153, 51, 0.60)';
   }
 }

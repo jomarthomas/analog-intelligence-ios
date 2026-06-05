@@ -1,10 +1,11 @@
 /**
  * Analog Intelligence design tokens.
  *
- * Dark-first film/darkroom aesthetic:
- *   - Deep neutral backgrounds (#141418 main, #1E1E28 card)
- *   - Warm amber/orange accent (#FF9933) — darkroom safelight + film orange mask
- *   - Light mode retains the brand but brightens surfaces
+ * Minimalist BLACK & WHITE, editorial/darkroom aesthetic:
+ *   - True-black OLED surfaces in dark mode, clean near-white paper in light mode
+ *   - NO colour accent — emphasis is pure contrast via `accent` (white on dark /
+ *     black on light) and `accentText` (what sits on the accent)
+ *   - `danger` (red) is the only functional colour, for destructive actions
  */
 
 import '@/global.css';

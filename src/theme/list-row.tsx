@@ -45,7 +45,7 @@ export function ListRow({
       <Text
         style={[
           styles.label,
-          { color: destructive ? '#FF453A' : theme.text },
+          { color: destructive ? '#E5484D' : theme.text },
         ]}
         numberOfLines={1}>
         {label}
