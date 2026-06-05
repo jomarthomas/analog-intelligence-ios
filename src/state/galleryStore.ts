@@ -33,10 +33,16 @@ import {
 import { getPreferences } from '../storage/preferences';
 import type {
   GallerySortOrder,
+  ProcessParamsSnapshot,
   ScanSession,
   ScannedImage,
   SessionState,
 } from '../storage/models';
+import {
+  applyParamsToRoll as applyParamsToRollService,
+  type ApplyLookOptions,
+  type ApplyLookResult,
+} from '../features/gallery/applyLookToRoll';
 
 // ---------------------------------------------------------------------------
 // State shape
@@ -71,6 +77,24 @@ export interface GalleryState {
   // --- Actions ---
   loadGallery: () => Promise<void>;
   refreshSession: (sessionId: string) => Promise<void>;
+
+  /**
+   * Apply one frame's adjustment look (a ProcessParamsSnapshot) to EVERY frame
+   * in the given roll: re-renders each processed positive through the pipeline,
+   * persists the new image + params, then refreshes this session in the store.
+   *
+   * Delegates the heavy work to the applyLookToRoll service (sequential,
+   * resilient, optionally cancellable via `opts.signal`) and reconciles
+   * in-memory state via `refreshSession` once it resolves — even on partial
+   * failure, so successfully re-rendered frames show their new positives.
+   *
+   * @returns the per-roll summary (succeeded / failed / skipped / cancelled).
+   */
+  applyParamsToRoll: (
+    sessionId: string,
+    params: ProcessParamsSnapshot,
+    opts?: ApplyLookOptions,
+  ) => Promise<ApplyLookResult>;
 
   createSession: (params: {
     name: string;
@@ -221,6 +245,21 @@ export const useGalleryStore = create<GalleryState>((set, get) => ({
     } catch {
       // Silently fall back to full reload on partial-refresh failure.
       await get().loadGallery();
+    }
+  },
+
+  // -----------------------------------------------------------------------
+  // applyParamsToRoll — sync one frame's look to every frame in the roll
+  // -----------------------------------------------------------------------
+  applyParamsToRoll: async (sessionId, params, opts) => {
+    // Heavy lifting (per-frame re-render + persist) lives in the service so it
+    // stays pure/testable and store-free. We always refresh afterwards — in a
+    // `finally` so even a thrown/cancelled run reconciles the frames that did
+    // get re-rendered.
+    try {
+      return await applyParamsToRollService(sessionId, params, opts);
+    } finally {
+      await get().refreshSession(sessionId);
     }
   },
 

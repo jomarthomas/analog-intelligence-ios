@@ -15,8 +15,9 @@
  * theme-driven; no hardcoded colour.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Modal,
@@ -34,9 +35,36 @@ import { Button } from '@/theme/button';
 import { FontSize, FontWeight, Radius, Spacing } from '@/constants/theme';
 import { useGalleryStore } from '@/state/galleryStore';
 import { updateSession as repoUpdateSession } from '@/storage';
-import type { FilmType, ScanSession, ScannedImage } from '@/storage';
+import type { FilmType, ProcessParamsSnapshot, ScanSession, ScannedImage } from '@/storage';
 
 import { exportRollSidecarCsv, exportRollSidecarJson } from './metadataSidecar';
+
+// ---------------------------------------------------------------------------
+// "Apply look to roll" — pick the source frame whose look gets synced
+// ---------------------------------------------------------------------------
+
+/**
+ * The "source look" for a roll is the most-recently-edited frame that actually
+ * has a processParams snapshot (i.e. the look the user last dialled in). Frames
+ * are compared by `updatedAt` (ISO-8601, lexicographically sortable). Returns
+ * undefined when no frame in the roll has been adjusted yet.
+ */
+function pickSourceLookFrame(frames: ScannedImage[]): ScannedImage | undefined {
+  let best: ScannedImage | undefined;
+  for (const frame of frames) {
+    if (frame.processParams === undefined) continue;
+    if (best === undefined || frame.updatedAt > best.updatedAt) {
+      best = frame;
+    }
+  }
+  return best;
+}
+
+/** Local UI state for an in-flight apply-to-roll run. */
+interface ApplyProgress {
+  current: number;
+  total: number;
+}
 
 // Stable empty array so the derived `sessionImages` keeps a constant reference
 // when no roll is open (avoids new-array churn in render).
@@ -141,9 +169,15 @@ export function RollMetadataSheet({ sessionId, onClose }: RollMetadataSheetProps
   // `updateSession` only accepts a narrower field set, so we go direct to the
   // repository (which we extended) and reconcile via `refreshSession`.
   const refreshSession = useGalleryStore((s) => s.refreshSession);
+  // Store action that re-renders every frame in the roll with one look.
+  const applyParamsToRoll = useGalleryStore((s) => s.applyParamsToRoll);
 
   const [form, setForm] = useState<FormState | null>(null);
   const [saving, setSaving] = useState(false);
+  // In-flight apply-to-roll progress (null = not running).
+  const [applyProgress, setApplyProgress] = useState<ApplyProgress | null>(null);
+  // AbortController for cancelling an in-flight apply-to-roll run.
+  const applyAbortRef = useRef<AbortController | null>(null);
 
   // Re-seed the form whenever a different roll is opened, or the underlying
   // session changes (e.g. after a save → refresh). Keyed on id+updatedAt so
@@ -171,12 +205,99 @@ export function RollMetadataSheet({ sessionId, onClose }: RollMetadataSheetProps
     return [...ordered, ...sessionImages.filter((img) => !seen.has(img.id))];
   }, [session, sessionImages]);
 
+  // The frame whose look ("most-recently-edited") will be synced to the roll.
+  // Undefined until at least one frame in the roll has been adjusted.
+  const sourceLookFrame = useMemo(
+    () => pickSourceLookFrame(orderedImages),
+    [orderedImages],
+  );
+
   if (!visible || form === null || session === undefined) {
     // Modal must still mount to animate out; render an empty transparent one.
     return <Modal visible={false} transparent onRequestClose={onClose} />;
   }
 
   const patch = (next: Partial<FormState>) => setForm((f) => (f ? { ...f, ...next } : f));
+
+  // -------------------------------------------------------------------------
+  // Apply look to roll
+  // -------------------------------------------------------------------------
+
+  /** Run the apply-to-roll service with progress + cancellation, then report. */
+  const runApplyLook = async (look: ProcessParamsSnapshot, sourceId: string) => {
+    const controller = new AbortController();
+    applyAbortRef.current = controller;
+    setApplyProgress({ current: 0, total: orderedImages.length });
+    try {
+      const result = await applyParamsToRoll(session.id, look, {
+        signal: controller.signal,
+        // The source frame already has this exact look — don't re-render it.
+        skipImageId: sourceId,
+        onProgress: ({ current, total }) => setApplyProgress({ current, total }),
+      });
+
+      // Result toast/alert — mirrors the batch-export summary phrasing.
+      if (result.cancelled) {
+        Alert.alert(
+          'Stopped',
+          `Applied the look to ${result.succeeded} ${result.succeeded === 1 ? 'frame' : 'frames'} before stopping.`,
+        );
+      } else if (result.failed === 0) {
+        Alert.alert(
+          'Look applied',
+          `Re-rendered ${result.succeeded} ${result.succeeded === 1 ? 'frame' : 'frames'} with this look.`,
+        );
+      } else if (result.succeeded > 0) {
+        Alert.alert(
+          'Partly applied',
+          `Re-rendered ${result.succeeded}, ${result.failed} failed.${
+            result.failures[0] ? `\n${result.failures[0].message}` : ''
+          }`,
+        );
+      } else {
+        Alert.alert(
+          'Could not apply look',
+          result.failures[0]?.message ?? 'No frames were re-rendered.',
+        );
+      }
+    } finally {
+      applyAbortRef.current = null;
+      setApplyProgress(null);
+    }
+  };
+
+  const handleApplyLook = () => {
+    if (sourceLookFrame === undefined || sourceLookFrame.processParams === undefined) {
+      Alert.alert(
+        'No look to apply',
+        'Adjust at least one frame in this roll first, then sync its look to the others.',
+      );
+      return;
+    }
+    // Every frame except the source gets re-rendered.
+    const targetCount = Math.max(orderedImages.length - 1, 0);
+    if (targetCount === 0) {
+      Alert.alert('Nothing to sync', 'This roll only has the frame you adjusted.');
+      return;
+    }
+
+    const look = sourceLookFrame.processParams;
+    const sourceId = sourceLookFrame.id;
+    Alert.alert(
+      'Apply look to roll?',
+      `This re-renders all ${targetCount} other ${targetCount === 1 ? 'frame' : 'frames'} in “${session.name}” with the look from your most recently edited frame. Existing edits on those frames will be replaced.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Apply',
+          style: 'destructive',
+          onPress: () => {
+            void runApplyLook(look, sourceId);
+          },
+        },
+      ],
+    );
+  };
 
   const handleSave = async () => {
     const name = form.name.trim();
@@ -331,6 +452,47 @@ export function RollMetadataSheet({ sessionId, onClose }: RollMetadataSheetProps
               placeholder="Anything worth remembering about this roll"
               multiline
             />
+
+            {/* Apply look to roll — sync one frame's adjustments to all frames */}
+            <Text style={[styles.sectionLabel, { color: theme.textTertiary }]}>
+              APPLY LOOK TO ROLL
+            </Text>
+            {applyProgress !== null ? (
+              <View
+                style={[
+                  styles.progressCard,
+                  { backgroundColor: theme.backgroundElevated, borderColor: theme.divider },
+                ]}>
+                <View style={styles.progressRow}>
+                  <ActivityIndicator size="small" color={theme.accent} />
+                  <Text style={[styles.progressText, { color: theme.text }]}>
+                    {applyProgress.current > 0
+                      ? `Applying to frame ${applyProgress.current} of ${applyProgress.total}…`
+                      : 'Preparing…'}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => applyAbortRef.current?.abort()}
+                  hitSlop={8}
+                  style={styles.progressStop}>
+                  <Text style={[styles.progressStopLabel, { color: theme.accent }]}>Stop</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Button
+                variant="primary"
+                size="sm"
+                style={styles.applyButton}
+                disabled={sourceLookFrame === undefined}
+                onPress={handleApplyLook}>
+                Apply look to roll
+              </Button>
+            )}
+            <Text style={[styles.exportHint, { color: theme.textTertiary }]}>
+              {sourceLookFrame === undefined
+                ? 'Adjust a frame in this roll, then sync its look to every other frame.'
+                : `Re-renders every frame with the adjustments from your most recently edited frame (${orderedImages.length === 1 ? '1 frame' : `${orderedImages.length} frames`}).`}
+            </Text>
 
             {/* Roll metadata export (sidecar manifests) */}
             <Text style={[styles.sectionLabel, { color: theme.textTertiary }]}>
@@ -496,5 +658,37 @@ const styles = StyleSheet.create({
   exportHint: {
     fontSize: FontSize.xs,
     lineHeight: FontSize.xs * 1.5,
+  },
+  applyButton: {
+    alignSelf: 'flex-start',
+  },
+  progressCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.md,
+  },
+  progressRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  progressText: {
+    flex: 1,
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.medium,
+  },
+  progressStop: {
+    paddingVertical: Spacing.xs,
+    paddingHorizontal: Spacing.xs,
+  },
+  progressStopLabel: {
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
   },
 });

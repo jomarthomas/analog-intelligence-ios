@@ -26,8 +26,8 @@
  *   (three orange sliders + Pro AI toggles + Done → Gallery).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { useTheme } from '@/hooks/use-theme';
@@ -36,7 +36,7 @@ import { Card } from '@/theme/card';
 import { ProBadge } from '@/theme/pro-badge';
 import { SectionHeader } from '@/theme/section-header';
 import { Screen } from '@/theme/screen';
-import { FontSize, FontWeight, Spacing } from '@/constants/theme';
+import { FontSize, FontWeight, Radius, Spacing } from '@/constants/theme';
 
 import {
   DEFAULT_FULL_PROCESS_PARAMS,
@@ -44,6 +44,7 @@ import {
   fromSnapshot,
   usePipeline,
   applyFilmProfile,
+  clampParam,
   NEUTRAL_PROFILE_ID,
 } from '@/processing';
 import type { FullProcessParams, FilmProfile } from '@/processing';
@@ -57,10 +58,10 @@ import {
   BeforeAfterCompare,
   FilmProfilePicker,
 } from '@/features/adjust';
-import { Histogram } from '@/insights';
-import { analyzeHistogram } from '../../../modules/ai-image-processing';
+import { Histogram, suggestFromLuma } from '@/insights';
+import { analyzeHistogram, estimateFilmBaseNeutral } from '../../../modules/ai-image-processing';
 import type { Histogram as HistogramData } from '../../../modules/ai-image-processing';
-import type { AggregateHistogram } from '@/insights';
+import type { AggregateHistogram, SuggestionPatch } from '@/insights';
 
 // ---------------------------------------------------------------------------
 // Histogram adapter
@@ -277,6 +278,54 @@ function AdjustScreenBody({
   // Live histogram on the current preview URI (debounced, race-guarded).
   const { histogram, isLoading: isHistogramLoading } = useLiveHistogram(pipeline.previewUri);
 
+  // Actionable suggestion derived from the live histogram (one-tap apply).
+  const [dismissedSuggestionId, setDismissedSuggestionId] = useState<string | null>(null);
+  const suggestion = useMemo(() => {
+    const s = suggestFromLuma(histogram?.luma);
+    return s != null && s.id !== dismissedSuggestionId ? s : null;
+  }, [histogram, dismissedSuggestionId]);
+
+  const handleApplySuggestion = useCallback(() => {
+    if (suggestion == null) return;
+    const cur = pipeline.params;
+    const p = suggestion.patch;
+    const add = (key: keyof SuggestionPatch, base: number | undefined) =>
+      clampParam(key, (base ?? 0) + (p[key] ?? 0));
+    pipeline.mergeParams({
+      exposure: add('exposure', cur.exposure),
+      warmth: add('warmth', cur.warmth),
+      contrast: add('contrast', cur.contrast),
+      saturation: add('saturation', cur.saturation),
+      highlights: add('highlights', cur.highlights),
+      shadows: add('shadows', cur.shadows),
+      vibrance: add('vibrance', cur.vibrance)
+    });
+    setDismissedSuggestionId(suggestion.id);
+  }, [suggestion, pipeline]);
+
+  // One-tap white balance: sample the unexposed film base (rebate) and set the
+  // warmth slider to neutralise its cast — a mobile take on IT8/grey-card
+  // calibration that no competitor does. (Tint axis isn't a slider yet.)
+  const [autoWbBusy, setAutoWbBusy] = useState(false);
+  const handleAutoWhiteBalance = useCallback(async () => {
+    setAutoWbBusy(true);
+    try {
+      const wb = await estimateFilmBaseNeutral(originalUri);
+      if (wb.found) {
+        pipeline.mergeParams({ warmth: clampParam('warmth', wb.warmth) });
+      } else {
+        Alert.alert(
+          'No film base found',
+          'Couldn’t find an unexposed film base in this frame to set white balance from.',
+        );
+      }
+    } catch {
+      // Non-fatal — leave the current white balance unchanged.
+    } finally {
+      setAutoWbBusy(false);
+    }
+  }, [originalUri, pipeline]);
+
   // Surface hard pipeline errors as an alert (preview + commit failures).
   useEffect(() => {
     if (pipeline.error !== null) {
@@ -377,10 +426,48 @@ function AdjustScreenBody({
           )}
         </View>
 
+        {/* Actionable suggestion from the live histogram — one-tap apply */}
+        {suggestion != null ? (
+          <View style={[styles.suggestionChip, { backgroundColor: theme.backgroundCard, borderColor: theme.border }]}>
+            <Text style={[styles.suggestionText, { color: theme.text }]} numberOfLines={2}>
+              {suggestion.title}
+            </Text>
+            <View style={styles.suggestionActions}>
+              <Pressable
+                onPress={() => setDismissedSuggestionId(suggestion.id)}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss suggestion">
+                <Text style={[styles.suggestionDismiss, { color: theme.textSecondary }]}>✕</Text>
+              </Pressable>
+              <Pressable
+                onPress={handleApplySuggestion}
+                accessibilityRole="button"
+                accessibilityLabel={`Apply: ${suggestion.title}`}
+                style={({ pressed }) => [
+                  styles.suggestionApply,
+                  { backgroundColor: theme.accent },
+                  pressed && { opacity: 0.8 }
+                ]}>
+                <Text style={[styles.suggestionApplyText, { color: theme.accentText }]}>Apply</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+
         {/* Film / lab look */}
         <SectionHeader title="Look" />
         <View style={styles.profilePicker}>
           <FilmProfilePicker selectedId={profileId} onSelect={handleSelectProfile} />
+        </View>
+        <View style={styles.autoWbRow}>
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={autoWbBusy}
+            onPress={() => void handleAutoWhiteBalance()}>
+            Auto WB from film base
+          </Button>
         </View>
 
         {/* Adjustments */}
@@ -501,10 +588,48 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     marginBottom: Spacing.xs,
   },
+  autoWbRow: {
+    flexDirection: 'row',
+    marginBottom: Spacing.sm,
+  },
   compareWrap: {
     height: 320,
     borderRadius: 12,
     overflow: 'hidden',
+  },
+  suggestionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginTop: Spacing.sm,
+  },
+  suggestionText: {
+    flex: 1,
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.medium,
+  },
+  suggestionActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  suggestionDismiss: {
+    fontSize: FontSize.md,
+    fontWeight: FontWeight.semibold,
+  },
+  suggestionApply: {
+    paddingVertical: 5,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radius.full,
+  },
+  suggestionApplyText: {
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
+    letterSpacing: 0.2,
   },
   histogramContainer: {
     marginTop: Spacing.sm,

@@ -13,6 +13,8 @@ export { InsightsView } from './InsightsView';
 export { Histogram } from './Histogram';
 export { ClippingCard } from './ClippingCard';
 export type { ClippingVariant } from './ClippingCard';
+export { suggestFromLuma, lumaStats } from './suggestions';
+export type { AdjustSuggestion, SuggestionPatch } from './suggestions';
 export {
   computeRollMetrics,
   frameMetricsFromImage,
