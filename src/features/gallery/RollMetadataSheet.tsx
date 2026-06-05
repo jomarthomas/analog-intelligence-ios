@@ -34,9 +34,13 @@ import { Button } from '@/theme/button';
 import { FontSize, FontWeight, Radius, Spacing } from '@/constants/theme';
 import { useGalleryStore } from '@/state/galleryStore';
 import { updateSession as repoUpdateSession } from '@/storage';
-import type { FilmType, ScanSession } from '@/storage';
+import type { FilmType, ScanSession, ScannedImage } from '@/storage';
 
 import { exportRollSidecarCsv, exportRollSidecarJson } from './metadataSidecar';
+
+// Stable empty array so the derived `sessionImages` keeps a constant reference
+// when no roll is open (avoids new-array churn in render).
+const EMPTY_IMAGES: ScannedImage[] = [];
 
 // ---------------------------------------------------------------------------
 // Film-type options (mirrors the FilmType enum in storage/models)
@@ -117,11 +121,20 @@ export type RollMetadataSheetProps = {
 export function RollMetadataSheet({ sessionId, onClose }: RollMetadataSheetProps) {
   const theme = useTheme();
 
-  const session = useGalleryStore((s) =>
-    sessionId ? s.allSessions.find((x) => x.id === sessionId) : undefined,
+  // IMPORTANT: select the stable store arrays and derive locally. Returning a
+  // fresh `.filter()`/`[]` directly from a zustand selector makes
+  // useSyncExternalStore see a new snapshot every render → infinite re-render
+  // ("Maximum update depth exceeded").
+  const allSessions = useGalleryStore((s) => s.allSessions);
+  const allImages = useGalleryStore((s) => s.allImages);
+  const session = useMemo(
+    () => (sessionId ? allSessions.find((x) => x.id === sessionId) : undefined),
+    [allSessions, sessionId],
   );
-  const sessionImages = useGalleryStore((s) =>
-    sessionId ? s.allImages.filter((img) => img.sessionId === sessionId) : [],
+  const sessionImages = useMemo(
+    () =>
+      sessionId ? allImages.filter((img) => img.sessionId === sessionId) : EMPTY_IMAGES,
+    [allImages, sessionId],
   );
   // Persist the full (extended) roll metadata through the repository, then
   // refresh the store so in-memory state matches. The store's own
