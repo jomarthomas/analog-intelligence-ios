@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   GestureResponderEvent,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -51,6 +52,8 @@ import { capturePhoto } from '@/camera/capturePhoto';
 import { averageFrames } from '../../modules/ai-image-processing';
 import { CAPTURE_FORMATS, CAPTURE_FORMAT_ORDER, type CaptureFormat } from '@/camera/types';
 import { FilmGuideOverlay } from '@/camera/FilmGuideOverlay';
+import { LivePositiveOverlay } from '@/camera/LivePositiveOverlay';
+import { useLivePositivePreview } from '@/camera/useLivePositivePreview';
 import { FocusPeakingOverlay } from '@/features/scan/FocusPeakingOverlay';
 import { ManualControlsPanel } from '@/features/scan/ManualControlsPanel';
 
@@ -169,12 +172,30 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
   // (Kodak-style). The user reveals the full panel via a small "Manual" toggle.
   const [showManual, setShowManual] = useState(false);
 
+  // LIVE INVERTED PREVIEW toggle (headline framing feature). Default ON so the
+  // user immediately sees a positive while aligning the negative; tapping
+  // "Negative" reveals the raw negative again. Local component state keeps this
+  // self-contained in the camera layer (no shared-store change required).
+  // Android-only: vision-camera's takeSnapshot (the basis of the live positive
+  // preview) is not implemented on iOS, so default it off there.
+  const [positivePreview, setPositivePreview] = useState(Platform.OS === 'android');
+
   // Live lighting + film-framing guidance — runs only while the camera is active
   // + idle, and yields to focus peaking so the session never has two frame
   // outputs at once. This single worklet powers BOTH the lighting hint and the
   // dimmed alignment guide's "fill the frame / ✓ film detected" state.
   const guidance = useCaptureGuidance(
     isActive && sessionReady && !isCapturing && !focusPeakingEnabled,
+  );
+
+  // Live inverted preview engine. Snapshot-driven (NO frame output added — the
+  // <Camera outputs> array is untouched), so it works without a frame processor.
+  // Runs ONLY while the scan is active + ready, the toggle is on, and we're NOT
+  // mid-capture (the loop pauses for the shutter). Fails gracefully: if
+  // takeSnapshot is unusable, `failed` flips and the overlay simply hides.
+  const positive = useLivePositivePreview(
+    cameraRef,
+    positivePreview && isActive && sessionReady && !isCapturing,
   );
 
   // Pull capabilities + initial 3A snapshot once the controller is bound.
@@ -306,6 +327,17 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
         />
       </Pressable>
 
+      {/* LIVE INVERTED PREVIEW — covers the real preview with a real-time
+          POSITIVE (inverted + orange-mask-corrected) so the user can see what
+          they're scanning while they align the strip. Snapshot-driven (no frame
+          processor). Hidden automatically when the toggle is off, while a real
+          capture is in flight (`positive.image` clears), or if snapshots aren't
+          usable on this device (`positive.failed`) — then the normal preview
+          shows through. pointerEvents:none keeps tap-to-focus working. */}
+      {positivePreview && !positive.failed ? (
+        <LivePositiveOverlay image={positive.image} />
+      ) : null}
+
       {/* Dimmed alignment guide — the FilmBox-style centre lane. Shown unless
           the user is focus-peaking (which needs an unobstructed view). It dims
           the surround so the user fills the lane with the negative, and shows
@@ -338,6 +370,19 @@ function ReadyCamera({ onCaptured, isActive, onError }: Required<Pick<CameraScan
           torch toggle and a small "Manual" disclosure. Flash mode + capture
           format live inside the manual panel so the default screen stays clean. */}
       <View style={styles.topBar} pointerEvents="box-none">
+        {/* Live inverted-preview toggle. "Positive" = show the corrected
+            positive over the live view (default); "Negative" = raw negative.
+            Disabled if snapshots aren't usable on this device. */}
+        {/* Live positive preview is Android-only — iOS vision-camera has no
+            takeSnapshot, so hide the toggle there (native shader is the TODO). */}
+        {Platform.OS === 'android' ? (
+          <TopButton
+            label={positivePreview ? 'Positive' : 'Negative'}
+            active={positivePreview}
+            disabled={positive.failed}
+            onPress={() => setPositivePreview((v) => !v)}
+          />
+        ) : null}
         <TopButton
           label={torchEnabled ? 'Light On' : 'Light'}
           active={torchEnabled}
