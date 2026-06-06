@@ -392,34 +392,38 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   // Batch controls — over the always-dark viewfinder, so fixed monochrome.
+  // Quiet by default so the viewfinder + guide dominate; they only gain full
+  // contrast once active. Anchored top-left, clear of the centred guide pill.
   batchBar: {
     position: 'absolute',
     top: Spacing.md,
     left: Spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.sm,
+    gap: Spacing.xs,
   },
   batchPill: {
-    paddingVertical: 6,
-    paddingHorizontal: Spacing.md,
+    paddingVertical: 5,
+    paddingHorizontal: Spacing.sm + 2,
     borderRadius: Radius.full,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.5)',
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderColor: 'rgba(255,255,255,0.22)',
+    backgroundColor: 'rgba(0,0,0,0.28)',
   },
   batchPillActive: {
     backgroundColor: Palette.ink,
     borderColor: Palette.ink,
   },
   batchPillText: {
-    color: Palette.ink,
+    // Dimmed white when inactive so the control recedes into the viewfinder.
+    color: 'rgba(255,255,255,0.7)',
     fontSize: FontSize.sm,
-    fontWeight: FontWeight.semibold,
+    fontWeight: FontWeight.medium,
     letterSpacing: 0.3,
   },
   batchPillTextActive: {
     color: Palette.black,
+    fontWeight: FontWeight.semibold,
   },
   reviewPill: {
     paddingVertical: 6,

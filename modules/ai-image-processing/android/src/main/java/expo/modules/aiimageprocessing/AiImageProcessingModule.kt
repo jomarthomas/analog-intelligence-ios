@@ -315,6 +315,15 @@ class AiImageProcessingModule : Module() {
       // Step 5 — gray-world channel normalization. ColorCorrector.normalizeChannels.
       normalizeChannels(r, g, b)
 
+      // Step 5b — residual-cast auto white balance (colour negatives only).
+      // Self-correcting safety net: measures whatever colour cast survived the
+      // orange-mask + gray-world stages (e.g. a residual cyan the capped mask
+      // gains couldn't fully lift) and removes it. ATTENUATION-ONLY, so it is
+      // structurally white-out-safe (see neutralizeResidualCast).
+      if (isColor) {
+        neutralizeResidualCast(r, g, b)
+      }
+
       // Step 6 — automatic tone curve. ColorCorrector.applyToneCorrection.
       applyToneCorrection(r, g, b)
     }
@@ -480,6 +489,11 @@ class AiImageProcessingModule : Module() {
   // Midtone-lift gamma power for the auto-tone curve (< 1 brightens midtones for
   // the clean lab-scan look; pow(v,<1) keeps [0,1] within [0,1]) (iOS kToneGamma).
   private val TONE_GAMMA = 0.8f
+  // Lower bound on a per-channel residual-cast gain in neutralizeResidualCast.
+  // Floors the attenuation so a legitimately-coloured scene is only partially
+  // neutralized (at most a 2× pull on the most over-represented channel); gains
+  // live in [MIN_NEUTRAL_GAIN, 1.0], so the stage can never boost (iOS kMinNeutralGain).
+  private val MIN_NEUTRAL_GAIN = 0.5f
 
   /** Clamp a derived density into [MIN_BASE_DENSITY, 1] (iOS clampDensity). */
   private fun clampDensity(v: Float): Float = min(1.0f, max(MIN_BASE_DENSITY, v))
@@ -575,25 +589,42 @@ class AiImageProcessingModule : Module() {
 
   /**
    * Convert a sampled film-base colour into the post-invert density convention.
-   * The removal step expects densities derived from the *inverted* base
-   * (`1 - base`), normalized to red, so the CIColorMatrix-equivalent gains are
-   * identical to before — only the estimate is better. Mirrors iOS
-   * `densitiesFromBase`.
+   *
+   * CYAN-CAST FIX (mirrors iOS densitiesFromBase): the densities are the
+   * post-invert base channels (`1 - base`) used DIRECTLY, exactly as legacy
+   * OrangeMaskEstimator.extractMaskParameters uses its sampled channel values.
+   * removeOrangeMask then forms `comp = 1/density` and normalizes to blue, so
+   * the densest channel is compensated most. A colour-negative base is orange
+   * (high R, mid G, low B), so the post-invert densities are (low R, mid G,
+   * high B): BLUE is densest and RED is compensated the MOST — which is exactly
+   * what lifts the inverted base's cyan back to neutral.
+   *
+   * The previous port returned red-normalized RATIOS clamped to
+   * [MIN_BASE_DENSITY, 1] (redDensity = 1, greenDensity = g/r, blueDensity =
+   * b/r). Because the post-invert base has R as the SMALLEST channel, g/r and
+   * b/r are both > 1 and BOTH clamped to 1 → all three densities collapsed to 1
+   * → all gains 1 → the mask removal became a NO-OP, leaving the full cyan cast.
+   * Using the densities directly restores the legacy 1/density differential and
+   * actually neutralizes the base.
+   *
+   * ROBUSTNESS (white-out guard, unchanged): every channel is floored to
+   * MIN_BASE_DENSITY so a near-white/contaminated base sample cannot drive a
+   * density → 0 (and the downstream 1/density gain → ∞). The downstream gains
+   * are additionally capped at MAX_MASK_GAIN in removeOrangeMask.
    */
   private fun densitiesFromBase(baseR: Float, baseG: Float, baseB: Float): OrangeMask {
-    // ROBUSTNESS (white-out guard): floor every post-invert base channel before
-    // the red-normalized ratios so a near-white/contaminated base sample cannot
-    // drive a density → 0 and the downstream 1/density gain → ∞ (which would
-    // blow the frame to pure white). Densities are then clamped into
-    // [MIN_BASE_DENSITY, 1]. Mirrors iOS densitiesFromBase.
+    // Post-invert equivalent of the base = 1 - base, each channel floored. Used
+    // DIRECTLY as the per-channel density (legacy convention) — NOT
+    // red-normalized — so the 1/density differential that neutralizes the cyan
+    // survives.
     val r = clampDensity(1f - baseR)
     val g = clampDensity(1f - baseG)
     val b = clampDensity(1f - baseB)
     val range = maxOf(r, g, b) - minOf(r, g, b)
     return OrangeMask(
-      redDensity = 1.0f,
-      greenDensity = clampDensity(g / r),
-      blueDensity = clampDensity(b / r),
+      redDensity = r,
+      greenDensity = g,
+      blueDensity = b,
       strength = if (range > 0.1f) min(1.0f, range * 2.0f) else 0.3f
     )
   }
@@ -651,9 +682,13 @@ class AiImageProcessingModule : Module() {
     val redComp = 1.0f / max(mask.redDensity, 0.1f)
     val greenComp = 1.0f / max(mask.greenDensity, 0.1f)
     val blueComp = 1.0f / max(mask.blueDensity, 0.1f)
-    // Normalize to the most-compensated (blue) channel, then CAP the per-channel
-    // gains at MAX_MASK_GAIN so mask removal can never multiply a channel hard
-    // enough to clip the frame to pure white (white-out guard, iOS parity).
+    // Normalize to blue (the reference channel, densest — and so least-
+    // compensated — for an orange base), then CAP the per-channel gains. With
+    // the corrected direct densities red/green are BOOSTED (gain >= 1) to lift
+    // the inverted base's crushed channels and kill the cyan; clamping to
+    // MAX_MASK_GAIN keeps that boost bounded so mask removal can never multiply a
+    // channel hard enough to blow the whole frame to pure white (white-out
+    // guard, iOS parity) while still fully neutralising the orange cast.
     val norm = max(blueComp, 0.0001f)
     val redGain = min(redComp / norm, MAX_MASK_GAIN)
     val greenGain = min(greenComp / norm, MAX_MASK_GAIN)
@@ -681,6 +716,56 @@ class AiImageProcessingModule : Module() {
     val target = (meanR + meanG + meanB) / 3f
 
     fun gain(mean: Float): Float = min(max(target / max(mean, 0.01f), 0.5f), 2.0f)
+    val gr = gain(meanR); val gg = gain(meanG); val gb = gain(meanB)
+    for (i in 0 until n) { r[i] *= gr; g[i] *= gg; b[i] *= gb }
+  }
+
+  // MARK: Step 5b — residual-cast auto white balance (attenuation-only)
+
+  /**
+   * Self-correcting residual-cast removal (the Android twin of iOS
+   * neutralizeResidualCast). Runs AFTER the orange-mask and gray-world stages
+   * and BEFORE the tone curve. It measures whatever colour cast still remains —
+   * most importantly the residual CYAN that the gain-capped removeOrangeMask
+   * plus gray-world can leave on a strongly orange-masked negative — and drives
+   * the three channel means toward neutral.
+   *
+   * WHITE-OUT SAFETY (structural): the correction is ATTENUATION-ONLY. The gain
+   * reference is the *minimum* channel mean, so the darkest channel keeps gain
+   * 1.0 and the brighter channels are scaled DOWN (gain <= 1.0). No channel is
+   * ever multiplied above 1.0, so no pixel value can increase and the frame can
+   * never be pushed to white. Gains are floored at MIN_NEUTRAL_GAIN so a
+   * genuinely-coloured scene is not over-neutralized. The slight overall
+   * darkening from pulling the bright channels down is re-expanded by the
+   * following tone curve (levels stretch + midtone lift), which re-pins white at
+   * 1.0 — net effect "neutral, then correctly exposed" (the FilmBox/Kodak look).
+   *
+   * Mean-domain note: computed over LINEAR pixels here, mirroring how this
+   * module's normalizeChannels takes its mean; iOS uses CIAreaAverage rendered
+   * to sRGB. This is the SAME accepted linear-vs-sRGB mean-domain difference
+   * already documented for gray-world in PARITY.md (iOS authoritative); it only
+   * nudges the measured cast a hair, the neutralization logic is identical.
+   */
+  private fun neutralizeResidualCast(r: FloatArray, g: FloatArray, b: FloatArray) {
+    val n = r.size
+    var sumR = 0.0; var sumG = 0.0; var sumB = 0.0
+    for (i in 0 until n) {
+      sumR += clamp01(r[i]).toDouble(); sumG += clamp01(g[i]).toDouble(); sumB += clamp01(b[i]).toDouble()
+    }
+    val meanR = (sumR / n).toFloat()
+    val meanG = (sumG / n).toFloat()
+    val meanB = (sumB / n).toFloat()
+
+    // Attenuation reference = the dimmest channel mean. Dividing by each mean
+    // yields a gain in (0, 1] for the brighter channels and exactly 1.0 for the
+    // dimmest — never a boost (the white-out guarantee). Floor each gain so a
+    // strongly-coloured scene is only partially corrected.
+    val reference = minOf(meanR, meanG, meanB)
+    fun gain(mean: Float): Float {
+      val raw = reference / max(mean, 0.01f)
+      // raw is already <= 1 by construction; floor it and belt-and-braces cap at 1.
+      return min(max(raw, MIN_NEUTRAL_GAIN), 1.0f)
+    }
     val gr = gain(meanR); val gg = gain(meanG); val gb = gain(meanB)
     for (i in 0 until n) { r[i] *= gr; g[i] *= gg; b[i] *= gb }
   }

@@ -227,10 +227,13 @@ const styles = StyleSheet.create({
     right: Spacing.lg,
     alignItems: 'center',
   },
+  // Quiet, recessive hint — the dynamic status pill is the primary cue, so this
+  // persistent goal line stays low-contrast and light to avoid a busy
+  // double-instruction over the viewfinder.
   captionText: {
-    color: withAlpha(Palette.ink, 0.85),
-    fontSize: FontSize.sm,
-    fontWeight: FontWeight.medium,
+    color: withAlpha(Palette.ink, 0.55),
+    fontSize: FontSize.xs,
+    fontWeight: FontWeight.regular,
     letterSpacing: 0.2,
     textAlign: 'center',
   },

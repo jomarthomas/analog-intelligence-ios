@@ -1,9 +1,11 @@
 /**
  * src/features/adjust/AdvancedSection.tsx
  *
- * A single, on-brand "Advanced" disclosure for the Adjust screen. Collapsed by
- * default so the screen reads effortlessly at a glance; tapping the header
- * reveals the power controls (fine sliders, Auto-WB, AI toggles, insight).
+ * The single, on-brand "Adjust" disclosure for the Adjust screen. Collapsed by
+ * default so the screen reads effortlessly at a glance — under the image there
+ * is only the Looks row and this one quiet affordance. Tapping the header
+ * reveals EVERY control (the core + fine sliders, the histogram insight,
+ * Auto-WB, the AI toggles, Reset).
  *
  * Visual language matches <SectionHeader>: an all-caps tertiary label, a large
  * full-width tap target, and a rotating chevron caret. Pure black & white — the
@@ -20,23 +22,23 @@ import Animated, { FadeIn } from 'react-native-reanimated';
 import { useTheme } from '@/hooks/use-theme';
 import { FontSize, FontWeight, Spacing } from '@/constants/theme';
 
-export type AdvancedSectionProps = {
-  /** All-caps section label (defaults to "Advanced"). */
+export type AdjustSectionProps = {
+  /** All-caps section label (defaults to "Adjust"). */
   title?: string;
   /** Whether the body is currently revealed. */
   expanded: boolean;
   /** Toggle handler — the parent flips `expanded`. */
   onToggle: () => void;
-  /** Power controls, rendered only while expanded. */
+  /** Controls, rendered only while expanded. */
   children: ReactNode;
 };
 
-function AdvancedSectionImpl({
-  title = 'Advanced',
+function AdjustSectionImpl({
+  title = 'Adjust',
   expanded,
   onToggle,
   children,
-}: AdvancedSectionProps) {
+}: AdjustSectionProps) {
   const theme = useTheme();
 
   return (
@@ -75,7 +77,7 @@ function AdvancedSectionImpl({
   );
 }
 
-export const AdvancedSection = memo(AdvancedSectionImpl);
+export const AdjustSection = memo(AdjustSectionImpl);
 
 const styles = StyleSheet.create({
   header: {

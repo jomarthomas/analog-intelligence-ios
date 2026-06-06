@@ -4,18 +4,20 @@
  * Route: adjust/[id]  (id = ScannedImage UUID from storage)
  * Presented as a modal stack push from the Scan tab after capture.
  *
- * DESIGN — progressive disclosure (effortless at a glance, power on demand):
+ * DESIGN — radical calm (effortless at a glance, full power one tap away):
  *
- *   PRIMARY (always visible):
- *     - the live preview, with a before/after drag-to-reveal compare;
- *     - the film **Looks** row — the differentiating control;
- *     - three primary sliders: Exposure / Warmth / Contrast.
+ *   DEFAULT (under the image, near-empty):
+ *     - the live preview (the hero), with a quiet before/after toggle in the
+ *       nav bar;
+ *     - the film **Looks** row — the one differentiating control;
+ *     - a single subtle "ADJUST" disclosure affordance.
  *
- *   ADVANCED (one collapsible, collapsed by default):
+ *   ADJUST disclosure (one collapsible, collapsed by default — holds EVERYTHING):
+ *     - the core sliders: Exposure / Warmth / Contrast;
  *     - actionable histogram insight (suggestFromLuma, one-tap apply);
  *     - the live <Histogram>;
  *     - "Auto WB from film base" (estimateFilmBaseNeutral);
- *     - fine sliders: Saturation / Highlights / Shadows / Vibrance;
+ *     - the fine sliders: Saturation / Highlights / Shadows / Vibrance;
  *     - Pro AI toggles (aiColor / aiDustRemoval) inside a <ProGate>;
  *     - Reset adjustments.
  *
@@ -65,7 +67,7 @@ import { useGalleryStore } from '@/state/galleryStore';
 import {
   AdjustPreview,
   AdjustSlider,
-  AdvancedSection,
+  AdjustSection,
   AIToggleRow,
   BeforeAfterCompare,
   FailedConversionBanner,
@@ -368,7 +370,7 @@ function AdjustScreenBody({
   }, [originalUri, mergeParams]);
 
   // Reset everything: params back to neutral, Look back to Natural, and collapse
-  // the Advanced disclosure so the screen returns to its effortless default.
+  // the Adjust disclosure so the screen returns to its effortless default.
   const handleReset = useCallback(() => {
     pipeline.resetParams();
     setProfileId(NEUTRAL_PROFILE_ID);
@@ -408,12 +410,16 @@ function AdjustScreenBody({
 
   return (
     <Screen edges={['top', 'bottom', 'left', 'right']}>
-      {/* Navigation header */}
+      {/* Navigation header. The centre slot carries the quiet before/after
+          toggle instead of a redundant screen title — context is obvious and
+          it keeps the area under the image empty. */}
       <View style={[styles.navBar, { borderBottomColor: theme.border }]}>
         <Button variant="ghost" size="sm" onPress={onCancel}>
           Cancel
         </Button>
-        <Text style={[styles.navTitle, { color: theme.text }]}>ADJUST</Text>
+        <Button variant="ghost" size="sm" onPress={() => setCompareMode((m) => !m)}>
+          {compareMode ? 'Edit' : 'Compare'}
+        </Button>
         <Button
           variant="primary"
           size="sm"
@@ -427,13 +433,6 @@ function AdjustScreenBody({
         style={styles.flex}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}>
-        {/* Before/after toggle */}
-        <View style={styles.previewHeaderRow}>
-          <Button variant="ghost" size="sm" onPress={() => setCompareMode((m) => !m)}>
-            {compareMode ? 'Edit' : 'Before / After'}
-          </Button>
-        </View>
-
         {/* Post-capture coaching: shown when the conversion is degenerate (the
             engine processed the room, not the film). Sits directly above the
             preview so the blank is explained in context, with a Retake CTA. */}
@@ -462,42 +461,45 @@ function AdjustScreenBody({
           />
         )}
 
-        {/* ───────────── PRIMARY: Looks ───────────── */}
-        <SectionHeader title="Look" />
+        {/* ───────────── DEFAULT: the Looks row (the one hero control) ───────────── */}
+        {/* The picker draws its own LOOKS / FILM & LAB group labels, so there is
+            no separate "Look" section header here (that was the redundant
+            double-label). */}
         <View style={styles.profilePicker}>
           <FilmProfilePicker selectedId={profileId} onSelect={handleSelectProfile} />
         </View>
 
-        {/* ───────────── PRIMARY: three core sliders ───────────── */}
-        <Card padding="md" elevated style={styles.card}>
-          <AdjustSlider
-            label="Exposure"
-            value={pipeline.params.exposure}
-            min={PARAM_RANGES.exposure.min}
-            max={PARAM_RANGES.exposure.max}
-            step={PARAM_RANGES.exposure.step}
-            onChange={(v) => setParam('exposure', v)}
-          />
-          <AdjustSlider
-            label="Warmth"
-            value={pipeline.params.warmth}
-            min={PARAM_RANGES.warmth.min}
-            max={PARAM_RANGES.warmth.max}
-            step={PARAM_RANGES.warmth.step}
-            onChange={(v) => setParam('warmth', v)}
-          />
-          <AdjustSlider
-            label="Contrast"
-            value={pipeline.params.contrast}
-            min={PARAM_RANGES.contrast.min}
-            max={PARAM_RANGES.contrast.max}
-            step={PARAM_RANGES.contrast.step}
-            onChange={(v) => setParam('contrast', v)}
-          />
-        </Card>
+        {/* ───────────── ADJUST: every slider + control, collapsed by default ───────────── */}
+        <AdjustSection expanded={advancedOpen} onToggle={() => setAdvancedOpen((o) => !o)}>
+          {/* Core sliders — moved off the default screen so the under-image area
+              stays calm; one tap on ADJUST reveals them. */}
+          <Card padding="md" elevated style={styles.card}>
+            <AdjustSlider
+              label="Exposure"
+              value={pipeline.params.exposure}
+              min={PARAM_RANGES.exposure.min}
+              max={PARAM_RANGES.exposure.max}
+              step={PARAM_RANGES.exposure.step}
+              onChange={(v) => setParam('exposure', v)}
+            />
+            <AdjustSlider
+              label="Warmth"
+              value={pipeline.params.warmth}
+              min={PARAM_RANGES.warmth.min}
+              max={PARAM_RANGES.warmth.max}
+              step={PARAM_RANGES.warmth.step}
+              onChange={(v) => setParam('warmth', v)}
+            />
+            <AdjustSlider
+              label="Contrast"
+              value={pipeline.params.contrast}
+              min={PARAM_RANGES.contrast.min}
+              max={PARAM_RANGES.contrast.max}
+              step={PARAM_RANGES.contrast.step}
+              onChange={(v) => setParam('contrast', v)}
+            />
+          </Card>
 
-        {/* ───────────── ADVANCED: everything else, collapsed by default ───────────── */}
-        <AdvancedSection expanded={advancedOpen} onToggle={() => setAdvancedOpen((o) => !o)}>
           {/* Actionable suggestion from the live histogram — one-tap apply */}
           {suggestion != null ? (
             <View
@@ -566,8 +568,7 @@ function AdjustScreenBody({
             </Button>
           </View>
 
-          {/* Fine adjustments */}
-          <SectionHeader title="Fine adjustments" style={styles.advancedHeader} />
+          {/* Fine adjustments — same calm slider list, no extra section header. */}
           <Card padding="md" elevated style={styles.card}>
             <AdjustSlider
               label="Saturation"
@@ -633,7 +634,7 @@ function AdjustScreenBody({
               Reset adjustments
             </Button>
           </View>
-        </AdvancedSection>
+        </AdjustSection>
       </ScrollView>
     </Screen>
   );
@@ -676,26 +677,21 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  navTitle: {
-    fontSize: FontSize.lg,
-    fontWeight: FontWeight.semibold,
-    letterSpacing: 1.5,
-  },
   content: {
     paddingHorizontal: Spacing.md,
-    paddingTop: Spacing.md,
+    // Generous breathing room above the Looks row so the image is the hero and
+    // the controls feel calm, not crowded under it.
+    paddingTop: Spacing.lg,
     paddingBottom: Spacing.xxl,
   },
   profilePicker: {
     // Full-bleed horizontal scroll: cancel the content's horizontal padding so
     // the chip row reaches the screen edges and scrolls naturally.
     marginHorizontal: -Spacing.md,
-    marginBottom: Spacing.md,
-  },
-  previewHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginBottom: Spacing.xs,
+    // Extra space before the single ADJUST disclosure rule below — keeps the
+    // default under-image state airy.
+    marginTop: Spacing.lg,
+    marginBottom: Spacing.sm,
   },
   coachingWrap: {
     marginBottom: Spacing.sm,
@@ -710,8 +706,8 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
   },
-  // The Advanced disclosure renders its own top rule + label, so section
-  // headers nested inside it don't need the default top padding.
+  // The Adjust disclosure renders its own top rule + label, so the AI section
+  // header nested inside it doesn't need the default top padding.
   advancedHeader: {
     paddingHorizontal: 0,
     paddingTop: Spacing.md,
