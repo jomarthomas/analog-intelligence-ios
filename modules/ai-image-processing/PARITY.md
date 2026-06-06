@@ -42,8 +42,9 @@ also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 | 0. `maxDimension` (optional) | `CILanczosScaleTransform` to cap longer edge (GPU-tiled) | `Bitmap.createScaledBitmap` BEFORE the FloatArray passes (OOM guard) | ✅ same intent; **approx** scaler |
 | 2. Linearize | `CILinearToSRGBToneCurve` in a linear working-space context | `srgbToLinear` (IEC 61966-2-1) | ✅ equivalent |
 | 3. Invert | `CIColorInvert` *(skipped for `slide`)* | `1 - c` in linear *(skipped for `slide`)* | ✅ exact |
-| 4. Orange mask | film-base sampling on pre-invert (most-orange `R−B`, R>G>B, 120<luma<250), else dark-px fallback; densities floored to `kMinBaseDensity`, gains capped at `kMaxMaskGain`; `CIColorMatrix` gains + `−0.05·strength` bias *(skipped for `slide`)* | same thresholds/constants/floors/caps; pre-invert channel copy for the base; nearest-neighbour stride downsample *(skipped for `slide`)* | ✅ same math; **approx** downsampler |
+| 4. Orange mask | film-base sampling on pre-invert (most-orange `R−B`, R>G>B, 120<luma<250), else dark-px fallback; base densities `1−base` floored to `kMinBaseDensity` and used **directly** (cyan-cast fix), gains capped at `kMaxMaskGain`; `CIColorMatrix` gains + `−0.05·strength` bias *(skipped for `slide`)* | same thresholds/constants/floors/caps; pre-invert channel copy for the base; nearest-neighbour stride downsample *(skipped for `slide`)* | ✅ same math; **approx** downsampler |
 | 5. Gray-world normalize | `CIAreaAverage` mean, gains clamped [0.5, 2.0] *(slide uses gentle stretch instead)* | same formula/clamp; mean over linear pixels *(slide uses gentle stretch instead)* | ✅ same; tiny mean-domain diff |
+| 5b. Residual-cast auto WB (`color` only) | `neutralizeResidualCast`: `CIAreaAverage` mean → per-channel gains toward the **min**-channel mean (attenuation-only, floored at `kMinNeutralGain`) via `CIColorMatrix` *(skipped for `bw`/`slide`)* | same formula/floor; mean over linear pixels *(skipped for `bw`/`slide`)* | ✅ same; same tiny mean-domain diff as gray-world |
 | 6. Auto tone curve | luminance CDF (BT.601), **robust 2%/98%** black/white, **bounded levels remap** (slope+bias, range floored at `kMinToneRange`), `contrast=1.1`, **midtone-lift `gamma=kToneGamma=0.8`** *(slide uses gentle stretch instead)* | identical thresholds/constants; remap+contrast+gamma applied in sRGB-encoded space *(slide uses gentle stretch instead)* | ✅ same; see white-out fix + tone-space note |
 | 5–6′. Slide normalize (`slide` only) | `normalizeSlide`: 1%/99% luma points → `CIColorMatrix` slope+bias (NO contrast/gamma), applied to **linear** image | `normalizeSlide`: same 1%/99% points, slope+bias applied in **sRGB-encoded** space (round-trip) | ✅ same algorithm; same linear-vs-sRGB tone-domain split as the negative tone curve (below) |
 | 7. User adjustments | shared Core Image graph (see below) | shared `applyAdjustmentChannels` (see below) | ✅ shared per platform |
@@ -54,6 +55,76 @@ also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 
 `analyzeHistogram` is an exact match: 256 bins/channel, BT.709 luma, bottom/top-5%
 clip percentages, normalized to sum ≈ 1.
+
+## Residual CYAN-cast fix (this round)
+
+After the white-out fix below, a correctly-framed C-41 colour negative converted
+without blowing out but came out with a strong, whole-image **cyan / blue cast**
+(neutrals and skin not neutral) — the classic "orange mask not fully
+neutralized". Inverting the orange film base yields cyan, and the mask + gray-world
+stages were *under*-correcting. Two coordinated fixes, applied **identically on
+both platforms** (iOS `AiImageProcessingModule.swift`, Android
+`AiImageProcessingModule.kt`), same constants and logic:
+
+### 1. The bug — `densitiesFromBase` collapsed the mask to a NO-OP (PRIMARY)
+
+The film-base path samples the unexposed **orange** rebate **pre-invert** (high R,
+mid G, low B) and converts it to the post-invert density convention `1 − base`
+(→ **low R, mid G, high B**). The previous port then returned **red-normalized
+ratios** clamped to `[kMinBaseDensity, 1]`: `redDensity = 1`,
+`greenDensity = clamp(g/r)`, `blueDensity = clamp(b/r)`. Because the post-invert
+base has **R as the smallest channel**, `g/r` and `b/r` are **both > 1** and both
+clamp to **1.0** → all three densities collapse to 1 → `removeOrangeMask`'s
+`comp = 1/density` are all equal → all gains **1.0** → the mask removal became a
+**NO-OP** (bar the tiny `−0.05·strength` bias). The cyan from inversion was left
+in place; gray-world (gains clamped `[0.5, 2.0]`) couldn't finish the job alone.
+
+**Fix:** use `(1−baseR, 1−baseG, 1−baseB)` **directly** as
+`(redDensity, greenDensity, blueDensity)` — exactly the legacy
+`OrangeMaskEstimator.extractMaskParameters` convention (it used its sampled
+channel values directly, not red-normalized ratios). Now blue is the densest
+channel, so after `removeOrangeMask` normalizes the `1/density` compensations to
+blue, **red is boosted the most** (capped at `kMaxMaskGain = 3.0`), lifting the
+crushed red channel and neutralizing the cyan. The `kMinBaseDensity = 0.05` floor
+and the `kMaxMaskGain = 3.0` cap are unchanged, so the white-out guard still
+holds (the boost is bounded; one channel can at worst saturate, never the whole
+frame). The dark-region fallback is unchanged — it samples **post-invert** darks
+where R is the max, so its red-normalized ratios are naturally ≤ 1 and were never
+hit by the clamp bug.
+
+### 2. New Step 5b — `neutralizeResidualCast` (self-correcting safety net)
+
+Because the mask boost is capped at 3.0, a *strongly* masked frame can still leave
+a faint residual cast. A new **attenuation-only auto-white-balance** stage runs on
+`color` negatives **after** gray-world and **before** the tone curve: it measures
+the three channel means (`CIAreaAverage` on iOS; linear-pixel mean on Android —
+the same accepted mean-domain split already used for gray-world) and scales each
+channel toward the **minimum** channel mean.
+
+- The gain reference is the *dimmest* channel, so the dimmest channel keeps gain
+  **1.0** and the brighter (cast) channels are scaled **down** — **no gain ever
+  exceeds 1.0**, so no pixel value can increase and the frame **cannot** be pushed
+  to white. This is a *structural* white-out guarantee (stronger than a numeric
+  cap).
+- Gains are floored at `kMinNeutralGain / MIN_NEUTRAL_GAIN = 0.5` (≤ 2× pull on
+  the most over-represented channel), so a *legitimately*-coloured scene (sunset,
+  foliage) is only **partially** neutralized, not flattened to grey.
+- The slight overall darkening (bright channels pulled down) is re-expanded by the
+  immediately-following tone curve (levels stretch + midtone-lift gamma), which
+  re-pins white at exactly 1.0 — net effect **"neutral, then correctly exposed"**,
+  the FilmBox/Kodak-lab look, with the cast removed and self-corrected to the
+  *measured* cast rather than a fixed magic gain.
+
+`bw` (desaturated anyway) and `slide` (already positive, no mask) **skip Step 5b**
+and are byte-for-byte unchanged.
+
+> **⚠ verify on device:** that a real C-41 frame now yields neutral greys /
+> believable skin (cyan gone) without over-neutralizing a deliberately warm/cool
+> scene, and that iOS and Android agree closely (the only divergence is the
+> documented Lanczos-vs-stride base sampler + the linear-vs-sRGB mean domain).
+> `kMaxMaskGain = 3.0` and `kMinNeutralGain = 0.5` are conservative; if a faint
+> cast survives, raise the mask cap a little or lower `kMinNeutralGain` toward
+> ~0.4 (both stay white-out-safe). iOS authoritative.
 
 ## White-out fix + tone/film-base robustness (this round)
 

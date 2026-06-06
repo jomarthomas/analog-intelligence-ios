@@ -282,6 +282,15 @@ public class AiImageProcessingModule: Module {
       // ColorCorrector.normalizeChannels.
       image = normalizeChannels(image: image)
 
+      // Step 5b — Residual-cast auto white balance (colour negatives only).
+      // Self-correcting safety net: measures whatever colour cast survived the
+      // orange-mask + gray-world stages (e.g. a residual cyan the capped mask
+      // gains couldn't fully lift) and removes it. ATTENUATION-ONLY, so it is
+      // structurally white-out-safe (see neutralizeResidualCast).
+      if isColor {
+        image = neutralizeResidualCast(image: image)
+      }
+
       // Step 6 — Automatic tone correction (histogram CDF → levels + gamma).
       // ColorCorrector.applyToneCorrection.
       image = applyToneCorrection(image: image)
@@ -577,27 +586,42 @@ public class AiImageProcessingModule: Module {
   }
 
   /// Convert a sampled film-base colour into the post-invert density convention.
-  /// The legacy removal expects densities derived from the *inverted* base
-  /// (i.e. `1 - base`), normalized to red. We reproduce that exactly so the
-  /// CIColorMatrix step is identical to before — only the estimate is better.
   ///
-  /// ROBUSTNESS (white-out guard): the post-invert base channels are floored to
-  /// `kMinBaseDensity` BEFORE the ratios are taken, so a near-white/over-bright
-  /// or contaminated base sample (which would otherwise drive a channel density
-  /// → 0 and the downstream `1/density` gain → ∞, blowing the image to pure
-  /// white) instead yields a bounded, well-behaved mask. Densities are then
-  /// clamped to `[kMinBaseDensity, 1]`.
+  /// CYAN-CAST FIX — the densities are the post-invert base channels (`1 - base`)
+  /// used DIRECTLY, exactly as legacy `OrangeMaskEstimator.extractMaskParameters`
+  /// uses its sampled channel values: `removeMaskColor` then forms
+  /// `comp = 1/density` and normalizes to blue, so the densest channel is
+  /// compensated most. For a colour-negative base (orange: high R, mid G, low B)
+  /// the post-invert densities are (low R, mid G, high B), so BLUE is densest and
+  /// RED is compensated the MOST — which is exactly what lifts the inverted
+  /// base's cyan back to neutral.
+  ///
+  /// The previous port instead returned red-normalized RATIOS clamped to
+  /// `[kMinBaseDensity, 1]` (`redDensity = 1`, `greenDensity = g/r`,
+  /// `blueDensity = b/r`). Because the post-invert base has R as the SMALLEST
+  /// channel, `g/r` and `b/r` are both > 1 and BOTH clamped to 1 → all three
+  /// densities collapsed to 1 → all gains 1 → the mask removal became a NO-OP,
+  /// leaving the full cyan cast. Using the densities directly restores the
+  /// legacy `1/density` differential and actually neutralizes the base.
+  ///
+  /// ROBUSTNESS (white-out guard, unchanged): every channel is floored to
+  /// `kMinBaseDensity` so a near-white/over-bright or contaminated base sample
+  /// cannot drive a density → 0 (and the downstream `1/density` gain → ∞). The
+  /// downstream gains are additionally capped at `kMaxMaskGain` in
+  /// `removeOrangeMask`, so even a large 1/density differential stays bounded.
   private func densitiesFromBase(baseR: Float, baseG: Float, baseB: Float) -> OrangeMask {
-    // Post-invert equivalent of the base = 1 - base (clamped). Floor every
-    // channel so no density can collapse toward zero.
+    // Post-invert equivalent of the base = 1 - base, each channel floored so no
+    // density can collapse toward zero. Used DIRECTLY as the per-channel density
+    // (legacy convention) — NOT red-normalized — so the 1/density differential
+    // that neutralizes the cyan survives.
     let r = clampDensity(1 - baseR)
     let g = clampDensity(1 - baseG)
     let b = clampDensity(1 - baseB)
     let range = max(r, g, b) - min(r, g, b)
     return OrangeMask(
-      redDensity: 1.0,
-      greenDensity: clampDensity(g / r),
-      blueDensity: clampDensity(b / r),
+      redDensity: r,
+      greenDensity: g,
+      blueDensity: b,
       strength: range > 0.1 ? min(1.0, range * 2.0) : 0.3
     )
   }
@@ -777,11 +801,13 @@ public class AiImageProcessingModule: Module {
     let greenComp = 1.0 / max(mask.greenDensity, 0.1)
     let blueComp = 1.0 / max(mask.blueDensity, 0.1)
 
-    // Normalize the compensations to the most-compensated (blue) channel, then
-    // CAP the per-channel gains. Even with floored densities a ratio could be
-    // a few ×; clamping to `kMaxMaskGain` guarantees the mask-removal step can
-    // never multiply a channel hard enough to clip the frame to pure white
-    // (white-out guard) while still neutralising a real orange cast.
+    // Normalize the compensations to blue (the reference channel, densest — and
+    // so least-compensated — for an orange base), then CAP the per-channel
+    // gains. With the corrected direct densities red/green are BOOSTED (gain ≥ 1)
+    // to lift the inverted base's crushed channels and kill the cyan; clamping
+    // to `kMaxMaskGain` keeps that boost bounded so the mask-removal step can
+    // never multiply a channel hard enough to blow the whole frame to pure white
+    // (white-out guard) while still fully neutralising the orange cast.
     let norm = max(blueComp, 0.0001)
     let redGain = CGFloat(min(redComp / norm, Self.kMaxMaskGain))
     let greenGain = CGFloat(min(greenComp / norm, Self.kMaxMaskGain))
@@ -831,6 +857,78 @@ public class AiImageProcessingModule: Module {
     let redGain = clampGain(r)
     let greenGain = clampGain(g)
     let blueGain = clampGain(b)
+
+    let m = CIFilter(name: "CIColorMatrix")!
+    m.setValue(image, forKey: kCIInputImageKey)
+    m.setValue(CIVector(x: redGain, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    m.setValue(CIVector(x: 0, y: greenGain, z: 0, w: 0), forKey: "inputGVector")
+    m.setValue(CIVector(x: 0, y: 0, z: blueGain, w: 0), forKey: "inputBVector")
+    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
+    return m.outputImage ?? image
+  }
+
+  // MARK: Step 5b — residual-cast auto white balance (attenuation-only)
+
+  /// Lower bound on a per-channel residual-cast gain. Floors the attenuation so
+  /// a legitimately-coloured scene (sunset, foliage) is only *partially*
+  /// neutralized rather than flattened to grey — at most a 2× pull on the most
+  /// over-represented channel. (Gains live in `[kMinNeutralGain, 1.0]`.)
+  private static let kMinNeutralGain: Float = 0.5
+
+  /// Self-correcting residual-cast removal that runs AFTER the orange-mask and
+  /// gray-world stages and BEFORE the tone curve. It measures whatever colour
+  /// cast still remains — most importantly the residual CYAN that the
+  /// gain-capped `removeOrangeMask` plus gray-world can leave on a strongly
+  /// orange-masked negative — and drives the three channel means toward neutral.
+  ///
+  /// WHITE-OUT SAFETY (structural): the correction is ATTENUATION-ONLY. The gain
+  /// reference is the *minimum* channel mean, so the darkest channel keeps gain
+  /// 1.0 and the brighter channels are scaled DOWN (gain ≤ 1.0). No channel is
+  /// ever multiplied above 1.0, so no pixel value can increase and the frame can
+  /// never be pushed to white. Gains are floored at `kMinNeutralGain` so a
+  /// genuinely-coloured scene is not over-neutralized. The slight overall
+  /// darkening from pulling the bright channels down is re-expanded by the
+  /// following tone curve (levels stretch + midtone lift), which re-pins white
+  /// at 1.0 — so the net effect is "neutral, then correctly exposed", the
+  /// FilmBox/Kodak-lab look, with the cast removed.
+  ///
+  /// Measures the means with `CIAreaAverage` rendered to sRGB, the SAME mean
+  /// domain as `normalizeChannels`, for cross-stage and cross-platform parity.
+  private func neutralizeResidualCast(image: CIImage) -> CIImage {
+    let extent = image.extent
+    let avg = CIFilter(name: "CIAreaAverage")!
+    avg.setValue(image, forKey: kCIInputImageKey)
+    avg.setValue(CIVector(cgRect: extent), forKey: kCIInputExtentKey)
+    guard let avgImage = avg.outputImage else { return image }
+
+    var bitmap = [UInt8](repeating: 0, count: 4)
+    ciContext.render(
+      avgImage,
+      toBitmap: &bitmap,
+      rowBytes: 4,
+      bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    let r = Float(bitmap[0]) / 255.0
+    let g = Float(bitmap[1]) / 255.0
+    let b = Float(bitmap[2]) / 255.0
+
+    // Attenuation reference = the dimmest channel mean. Dividing by each mean
+    // yields a gain in (0, 1] for the brighter channels and exactly 1.0 for the
+    // dimmest — never a boost (the white-out guarantee). Floor each gain so a
+    // strongly-coloured scene is only partially corrected.
+    let reference = min(r, min(g, b))
+    func gain(_ mean: Float) -> CGFloat {
+      let raw = reference / max(mean, 0.01)
+      // raw is already ≤ 1 by construction; floor it and belt-and-braces cap at 1.
+      return CGFloat(min(max(raw, Self.kMinNeutralGain), 1.0))
+    }
+    let redGain = gain(r)
+    let greenGain = gain(g)
+    let blueGain = gain(b)
 
     let m = CIFilter(name: "CIColorMatrix")!
     m.setValue(image, forKey: kCIInputImageKey)
