@@ -20,10 +20,20 @@
  *   3. We crop the captured file with expo-image-manipulator and return the new
  *      `file://` URI + dimensions.
  *
- * FALLBACK (must never break capture):
- *   If detection fails, returns no rect, is low-confidence, or the manipulator
- *   throws, we return the ORIGINAL uri unchanged with `cropped: false`. The
- *   caller then proceeds exactly as it did before this feature existed.
+ * FALLBACK (must never feed the engine the room):
+ *   If detection fails, returns no rect, or is low-confidence, we DO NOT hand
+ *   the engine the whole frame (that's the room behind a held-up negative, which
+ *   the pipeline can't make a positive from). Instead we crop to a FIXED CENTRE
+ *   box — the middle 72% × 72% — so the bright room edges are always excluded and
+ *   the film, which the user was coached to centre, is what reaches the engine.
+ *   Only if even that fixed crop can't be produced (manipulator throws, unknown
+ *   source dimensions) do we fall back HARD to the original uri unchanged, so
+ *   capture is never broken.
+ *
+ *   The chosen path is reported via `cropMode`:
+ *     'detected' — cropped to a confidently-detected film rect
+ *     'centered' — detection failed, cropped to the fixed centre box
+ *     'none'     — hard fallback, returned the original full frame
  *
  * This file is pure orchestration over the shared native contract
  * (`detectFilmFrame`) + expo-image-manipulator; the heavy lifting is native.
@@ -63,6 +73,17 @@ const MIN_AREA_FRACTION = 0.05;
  */
 const FULL_FRAME_EPSILON = 0.98;
 
+/**
+ * Fixed centre-crop size (fraction of each axis) used when detection fails or is
+ * low-confidence. A held-up negative is roughly centred (the dimmed lane on the
+ * scan screen coaches exactly that), so cropping to the middle 72% reliably
+ * drops the bright room edges that would otherwise blow the engine out, while
+ * keeping enough margin that we don't clip a reasonably-framed negative. Tuned
+ * conservatively: too tight risks cutting the film, too loose lets the room back
+ * in. 0.72 keeps the centre and trims 14% off every side.
+ */
+const CENTERED_CROP_FRACTION = 0.72;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -70,14 +91,27 @@ const FULL_FRAME_EPSILON = 0.98;
 export interface AutoCropResult {
   /** `file://` URI to use downstream — the cropped file, or the original. */
   uri: string;
-  /** True when an auto-crop was applied; false when we fell back to full-frame. */
+  /**
+   * True when ANY crop was applied (detected OR centered fallback); false only
+   * on the hard full-frame fallback. Equivalent to `cropMode !== 'none'`.
+   */
   cropped: boolean;
+  /**
+   * Which crop path produced `uri`:
+   *   'detected' — confidently-detected film rect,
+   *   'centered' — fixed centre box (detection failed/low-confidence),
+   *   'none'     — original full frame (hard fallback).
+   */
+  cropMode: CropMode;
   /** Pixel dimensions of `uri` when known (cropped result), else undefined. */
   width?: number;
   height?: number;
   /** The detection result, surfaced so callers can log / show subtle UI. */
   detection?: FrameDetectionResult;
 }
+
+/** How `AutoCropResult.uri` was produced. See {@link AutoCropResult.cropMode}. */
+export type CropMode = 'detected' | 'centered' | 'none';
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-testable, no native calls)
@@ -106,6 +140,32 @@ export function clampRectToImage(
   const width = Math.max(1, Math.min(Math.round(rect.width), imageWidth - x));
   const height = Math.max(1, Math.min(Math.round(rect.height), imageHeight - y));
   return { x, y, width, height };
+}
+
+/**
+ * Compute the fixed centre-crop rect (a `fraction`×`fraction` box centred in the
+ * image) used as the fallback when detection fails. Pure + total so it's
+ * unit-testable. The result is already clamped to whole pixels inside the image,
+ * so it can be handed straight to the manipulator.
+ *
+ * Returns `null` when the image is too small to produce a sane crop (≤ 0 dims),
+ * signalling the caller to fall back hard to the original frame.
+ */
+export function centeredCropRect(
+  imageWidth: number,
+  imageHeight: number,
+  fraction: number = CENTERED_CROP_FRACTION,
+): PixelRect | null {
+  if (imageWidth <= 0 || imageHeight <= 0) return null;
+  // Clamp the fraction defensively so a bad caller can't invert the box.
+  const f = Math.max(0.1, Math.min(fraction, 1));
+  const rect: PixelRect = {
+    x: (imageWidth * (1 - f)) / 2,
+    y: (imageHeight * (1 - f)) / 2,
+    width: imageWidth * f,
+    height: imageHeight * f,
+  };
+  return clampRectToImage(rect, imageWidth, imageHeight);
 }
 
 /**
@@ -156,13 +216,40 @@ export function evaluateDetection(
 // ---------------------------------------------------------------------------
 
 /**
- * Detect the film frame in `originalUri` and, if confidently found, crop the
- * file to it. Always resolves — on ANY failure it returns the original uri so
- * the capture flow continues unbroken (graceful degradation, task #2).
+ * Crop `originalUri` to `rect` via expo-image-manipulator and return the new
+ * cache file. Throws on any manipulator failure so the caller can decide the
+ * fallback. The ORIGINAL stays untouched on disk; we re-encode a JPEG cache copy
+ * (the engine reads pixels, not metadata, so that's fine).
+ */
+async function cropFileToRect(
+  originalUri: string,
+  rect: PixelRect,
+): Promise<{ uri: string; width: number; height: number }> {
+  // SDK 56 contextual ImageManipulator API: manipulate → crop → render → save.
+  const context = ImageManipulator.manipulate(originalUri).crop({
+    originX: rect.x,
+    originY: rect.y,
+    width: rect.width,
+    height: rect.height,
+  });
+  const ref = await context.renderAsync();
+  const saved = await ref.saveAsync({ compress: 0.95, format: SaveFormat.JPEG });
+  return { uri: saved.uri, width: saved.width, height: saved.height };
+}
+
+/**
+ * Detect the film frame in `originalUri` and crop the file to it. Always
+ * resolves — and CRUCIALLY, never falls back to the full frame on a normal miss:
+ * when detection fails or is low-confidence it crops to a FIXED CENTRE box so the
+ * bright room behind a held-up negative is excluded (task #2). The only path that
+ * returns the untouched original is the hard fallback where even the centre crop
+ * can't be produced (unknown source dims or the manipulator throws), which keeps
+ * capture unbroken.
  *
  * @param originalUri `file://` URI of the freshly-captured negative.
- * @param imageWidth  Capture pixel width (0 if unknown, e.g. RAW). Used only to
- *   validate the detected rect's coverage; geometry checks are skipped when 0.
+ * @param imageWidth  Capture pixel width (0 if unknown, e.g. RAW). Used to
+ *   validate the detected rect's coverage AND to size the centre fallback;
+ *   when 0 we cannot crop safely and fall back hard to the full frame.
  * @param imageHeight Capture pixel height (0 if unknown).
  */
 export async function autoCropToFilmFrame(
@@ -170,65 +257,71 @@ export async function autoCropToFilmFrame(
   imageWidth: number,
   imageHeight: number,
 ): Promise<AutoCropResult> {
-  let detection: FrameDetectionResult;
+  let detection: FrameDetectionResult | undefined;
   try {
     detection = await detectFilmFrame(originalUri);
   } catch (err) {
-    // Detection itself threw (unsupported, bad file, …) → full-frame fallback.
+    // Detection itself threw (unsupported, bad file, …). We still want to keep
+    // the room out of the engine, so we proceed to the centred-crop fallback
+    // below rather than returning the full frame.
     if (__DEV__) {
-      console.warn('[autoCrop] detectFilmFrame failed, using full frame:', err);
+      console.warn('[autoCrop] detectFilmFrame failed, trying centre crop:', err);
     }
-    return { uri: originalUri, cropped: false };
   }
 
-  const verdict = evaluateDetection(detection, imageWidth, imageHeight);
-  if (!verdict.ok) {
-    if (__DEV__) {
-      console.log('[autoCrop] not cropping —', verdict.reason);
+  // --- 1. Confident detection → crop to the detected film rect. ---
+  if (detection !== undefined) {
+    const verdict = evaluateDetection(detection, imageWidth, imageHeight);
+    if (verdict.ok && imageWidth > 0 && imageHeight > 0) {
+      const rect = clampRectToImage(verdict.rect as PixelRect, imageWidth, imageHeight);
+      try {
+        const saved = await cropFileToRect(originalUri, rect);
+        return {
+          uri: saved.uri,
+          cropped: true,
+          cropMode: 'detected',
+          width: saved.width,
+          height: saved.height,
+          detection,
+        };
+      } catch (err) {
+        // Detected-crop manipulation failed — fall through to the centre crop.
+        if (__DEV__) {
+          console.warn('[autoCrop] detected crop failed, trying centre crop:', err);
+        }
+      }
+    } else if (__DEV__ && !verdict.ok) {
+      console.log('[autoCrop] no usable detection —', verdict.reason, '→ centre crop');
     }
-    return { uri: originalUri, cropped: false, detection };
   }
 
-  // We have a trustworthy rect. Crop the file. If we don't know the source
-  // dimensions we cannot clamp precisely, so fall back to full-frame rather
-  // than risk handing the cropper an out-of-bounds rect.
-  if (imageWidth <= 0 || imageHeight <= 0) {
-    if (__DEV__) {
-      console.log('[autoCrop] source dimensions unknown — skipping crop (safe).');
+  // --- 2. Fallback: fixed centre crop so the room edges never reach the engine. ---
+  // Needs the source dimensions to size the box; without them we can't crop safely.
+  const centerRect = centeredCropRect(imageWidth, imageHeight);
+  if (centerRect !== null) {
+    try {
+      const saved = await cropFileToRect(originalUri, centerRect);
+      if (__DEV__) {
+        console.log('[autoCrop] applied centred fallback crop', centerRect);
+      }
+      return {
+        uri: saved.uri,
+        cropped: true,
+        cropMode: 'centered',
+        width: saved.width,
+        height: saved.height,
+        detection,
+      };
+    } catch (err) {
+      // Even the centre crop failed (decode error, OOM, …) → hard full-frame fallback.
+      if (__DEV__) {
+        console.warn('[autoCrop] centre crop failed, using full frame:', err);
+      }
     }
-    return { uri: originalUri, cropped: false, detection };
+  } else if (__DEV__) {
+    console.log('[autoCrop] source dimensions unknown — using full frame (safe).');
   }
 
-  const rect = clampRectToImage(
-    verdict.rect as PixelRect,
-    imageWidth,
-    imageHeight,
-  );
-
-  try {
-    // SDK 56 contextual ImageManipulator API: manipulate → crop → render → save.
-    // We re-encode JPEG at high quality; the engine reads pixels, not metadata,
-    // so a JPEG cache copy is fine here (the ORIGINAL stays untouched on disk).
-    const context = ImageManipulator.manipulate(originalUri).crop({
-      originX: rect.x,
-      originY: rect.y,
-      width: rect.width,
-      height: rect.height,
-    });
-    const ref = await context.renderAsync();
-    const saved = await ref.saveAsync({ compress: 0.95, format: SaveFormat.JPEG });
-    return {
-      uri: saved.uri,
-      cropped: true,
-      width: saved.width,
-      height: saved.height,
-      detection,
-    };
-  } catch (err) {
-    // Manipulator failed (decode error, OOM, …) → full-frame fallback.
-    if (__DEV__) {
-      console.warn('[autoCrop] crop failed, using full frame:', err);
-    }
-    return { uri: originalUri, cropped: false, detection };
-  }
+  // --- 3. Hard fallback: original, untouched. Capture is never broken. ---
+  return { uri: originalUri, cropped: false, cropMode: 'none', detection };
 }
