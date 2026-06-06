@@ -20,3 +20,12 @@ export { BeforeAfterCompare } from './BeforeAfterCompare';
 
 export { AdvancedSection } from './AdvancedSection';
 export type { AdvancedSectionProps } from './AdvancedSection';
+
+export {
+  FailedConversionBanner,
+  isFailedConversion,
+  extremePileFraction,
+  DEGENERATE_EXTREME_FRACTION,
+  DEGENERATE_MIN_OCCUPIED_RANGE,
+} from './FailedConversionBanner';
+export type { FailedConversionBannerProps } from './FailedConversionBanner';

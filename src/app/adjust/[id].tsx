@@ -68,7 +68,9 @@ import {
   AdvancedSection,
   AIToggleRow,
   BeforeAfterCompare,
+  FailedConversionBanner,
   FilmProfilePicker,
+  isFailedConversion,
 } from '@/features/adjust';
 import { Histogram, suggestFromLuma } from '@/insights';
 import { analyzeHistogram, estimateFilmBaseNeutral } from '../../../modules/ai-image-processing';
@@ -228,6 +230,7 @@ export default function AdjustScreen() {
         router.replace('/(tabs)/gallery');
       }}
       onCancel={() => router.back()}
+      onRetake={() => router.replace('/(tabs)/scan')}
     />
   );
 }
@@ -242,6 +245,8 @@ type AdjustScreenBodyProps = {
   initialParams: Parameters<typeof usePipeline>[0]['initialParams'];
   onCommitted: () => Promise<void>;
   onCancel: () => void;
+  /** Navigate back to the Scan tab to re-shoot (failed-conversion recovery). */
+  onRetake: () => void;
 };
 
 function AdjustScreenBody({
@@ -250,6 +255,7 @@ function AdjustScreenBody({
   initialParams,
   onCommitted,
   onCancel,
+  onRetake,
 }: AdjustScreenBodyProps) {
   const theme = useTheme();
 
@@ -295,6 +301,23 @@ function AdjustScreenBody({
 
   // Live histogram on the current preview URI (debounced, race-guarded).
   const { histogram, isLoading: isHistogramLoading } = useLiveHistogram(pipeline.previewUri);
+
+  // POST-CAPTURE COACHING: when the preview's luma histogram is degenerate (the
+  // engine ended up processing the room, not the film → a near-black/blown blank),
+  // surface friendly, actionable guidance instead of a confusing dark image. The
+  // banner is dismissible, and we re-show it if a fresh preview is still degenerate.
+  const [coachingDismissed, setCoachingDismissed] = useState(false);
+  const conversionFailed = useMemo(
+    () => isFailedConversion(histogram?.luma),
+    [histogram],
+  );
+  // A new preview (different URI) is a new chance — reset the dismissal so the
+  // user isn't silently left on a still-broken scan after they tweak something.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCoachingDismissed(false);
+  }, [pipeline.previewUri]);
+  const showCoaching = conversionFailed && !coachingDismissed && !compareMode;
 
   // Actionable suggestion derived from the live histogram (one-tap apply).
   const [dismissedSuggestionId, setDismissedSuggestionId] = useState<string | null>(null);
@@ -410,6 +433,18 @@ function AdjustScreenBody({
             {compareMode ? 'Edit' : 'Before / After'}
           </Button>
         </View>
+
+        {/* Post-capture coaching: shown when the conversion is degenerate (the
+            engine processed the room, not the film). Sits directly above the
+            preview so the blank is explained in context, with a Retake CTA. */}
+        {showCoaching ? (
+          <View style={styles.coachingWrap}>
+            <FailedConversionBanner
+              onRetake={onRetake}
+              onDismiss={() => setCoachingDismissed(true)}
+            />
+          </View>
+        ) : null}
 
         {/* Live preview (positive) + watermark — or the drag-to-reveal compare */}
         {compareMode ? (
@@ -661,6 +696,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'flex-end',
     marginBottom: Spacing.xs,
+  },
+  coachingWrap: {
+    marginBottom: Spacing.sm,
   },
   autoWbRow: {
     flexDirection: 'row',

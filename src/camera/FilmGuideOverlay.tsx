@@ -16,6 +16,10 @@
  *   • Corner brackets on the lane, whose colour reflects the live framing state.
  *   • A small status pill ("Place the negative…", "Move closer…", "✓ Film
  *     detected") fed by the framing state from `useCaptureGuidance`.
+ *   • A persistent goal caption under the lane that always states the target —
+ *     ONE frame filling the lane, held close, on an even backlight — so the user
+ *     knows what "right" looks like even before the live state updates. This is
+ *     the copy that turns "near-black room" mistakes into good fills (task #3).
  *
  * It is PURELY presentational and `pointerEvents="none"` so taps fall through to
  * tap-to-focus underneath. The live framing state is computed upstream (one
@@ -91,6 +95,17 @@ function FilmGuideOverlayImpl({
           <Text style={[styles.pillText, ready && styles.pillTextReady]}>{message}</Text>
         </View>
       </View>
+
+      {/* Persistent goal caption — anchored above the bottom scrim edge. States
+          the target so the user fills the lane correctly the first time. Hidden
+          once aligned so it doesn't compete with the "ready" pill. */}
+      {!ready ? (
+        <View style={styles.captionWrap} pointerEvents="none">
+          <Text style={styles.captionText}>
+            Fill the lane with ONE frame · hold close · even backlight
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -204,5 +219,19 @@ const styles = StyleSheet.create({
   },
   pillTextReady: {
     color: Palette.black,
+  },
+  captionWrap: {
+    position: 'absolute',
+    bottom: Spacing.xxl + Spacing.lg,
+    left: Spacing.lg,
+    right: Spacing.lg,
+    alignItems: 'center',
+  },
+  captionText: {
+    color: withAlpha(Palette.ink, 0.85),
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.medium,
+    letterSpacing: 0.2,
+    textAlign: 'center',
   },
 });
