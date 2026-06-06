@@ -43,9 +43,9 @@ also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 | 2. Linearize | `CILinearToSRGBToneCurve` in a linear working-space context | `srgbToLinear` (IEC 61966-2-1) | ✅ equivalent |
 | 3. Invert | `CIColorInvert` *(skipped for `slide`)* | `1 - c` in linear *(skipped for `slide`)* | ✅ exact |
 | 4. Orange mask | film-base sampling on pre-invert (most-orange `R−B`, R>G>B, 120<luma<250), else dark-px fallback; base densities `1−base` floored to `kMinBaseDensity` and used **directly** (cyan-cast fix), gains capped at `kMaxMaskGain`; `CIColorMatrix` gains + `−0.05·strength` bias *(skipped for `slide`)* | same thresholds/constants/floors/caps; pre-invert channel copy for the base; nearest-neighbour stride downsample *(skipped for `slide`)* | ✅ same math; **approx** downsampler |
-| 5. Gray-world normalize | `CIAreaAverage` mean, gains clamped [0.5, 2.0] *(slide uses gentle stretch instead)* | same formula/clamp; mean over linear pixels *(slide uses gentle stretch instead)* | ✅ same; tiny mean-domain diff |
-| 5b. Residual-cast auto WB (`color` only) | `neutralizeResidualCast`: `CIAreaAverage` mean → per-channel gains toward the **min**-channel mean (attenuation-only, floored at `kMinNeutralGain`) via `CIColorMatrix` *(skipped for `bw`/`slide`)* | same formula/floor; mean over linear pixels *(skipped for `bw`/`slide`)* | ✅ same; same tiny mean-domain diff as gray-world |
-| 6. Auto tone curve | luminance CDF (BT.601), **robust 2%/98%** black/white, **bounded levels remap** (slope+bias, range floored at `kMinToneRange`), `contrast=1.1`, **midtone-lift `gamma=kToneGamma=0.8`** *(slide uses gentle stretch instead)* | identical thresholds/constants; remap+contrast+gamma applied in sRGB-encoded space *(slide uses gentle stretch instead)* | ✅ same; see white-out fix + tone-space note |
+| 5. Gray-world normalize (`bw` only) | `CIAreaAverage` mean, gains clamped [0.5, 2.0]. **`color` no longer runs this** — subsumed by per-channel norm (row 6); `bw` unchanged; *slide uses gentle stretch* | same formula/clamp; mean over linear pixels. *(`color` skips; `bw`/`slide` as before)* | ✅ same; tiny mean-domain diff |
+| 5b. Residual-cast auto WB | **REMOVED** — `neutralizeResidualCast` deleted on both platforms; per-channel normalization (row 6) subsumes it. (Was `color`-only; `bw`/`slide` never ran it.) | **REMOVED** (twin deletion). | ✅ removed on both |
+| 6. Auto colour balance + tone | **`color`: PER-CHANNEL** `applyPerChannelToneCorrection` — independent R/G/B histograms → **robust 2%/98%** black/white **per channel** → **3 independent** slope+bias level maps (`channelSlopeBias`, degenerate guard: range < `kMinToneRange` ⇒ identity), then global `contrast=1.1` + midtone-lift `gamma=kToneGamma=0.8`. **`bw`: luma-only** `applyToneCorrection` (unchanged). *slide: gentle stretch* | identical: `color` runs `applyPerChannelToneCorrection` (3 sRGB-encoded histograms, same per-channel robust points + degenerate guard + global contrast/gamma via `toneMap`); `bw` runs the unchanged luma `applyToneCorrection`; *slide: gentle stretch* | ✅ same; per-channel + see yellow-green fix + tone-space note |
 | 5–6′. Slide normalize (`slide` only) | `normalizeSlide`: 1%/99% luma points → `CIColorMatrix` slope+bias (NO contrast/gamma), applied to **linear** image | `normalizeSlide`: same 1%/99% points, slope+bias applied in **sRGB-encoded** space (round-trip) | ✅ same algorithm; same linear-vs-sRGB tone-domain split as the negative tone curve (below) |
 | 7. User adjustments | shared Core Image graph (see below) | shared `applyAdjustmentChannels` (see below) | ✅ shared per platform |
 | B&W | `CIColorControls` saturation 0 *(`bw` only; slide stays colour)* | collapse to BT.709 luma *(`bw` only; slide stays colour)* | ✅ both grayscale |
@@ -55,6 +55,107 @@ also gained `maxDimension: Double = 0`; `mode` accepts `"slide"`).
 
 `analyzeHistogram` is an exact match: 256 bins/channel, BT.709 luma, bottom/top-5%
 clip percentages, normalized to sum ≈ 1.
+
+## Residual YELLOW-GREEN cast fix — PER-CHANNEL colour balance (this round)
+
+After the cyan-cast fix below, a real-device C-41 capture converted without the
+cyan (the orange-mask removal now works), but the positive came out with a clear
+**yellow-green cast**: whites went yellow-green, midtones warm-green.
+
+### Root cause — a single LUMINANCE remap can't neutralize a colour cast
+
+Step 6 (`applyToneCorrection`) worked on **one luminance histogram** and applied
+**one** black/white-point levels remap **equally to R, G and B**. That rescales
+overall brightness/contrast but is *mathematically incapable* of removing a
+per-channel colour cast — if (say) red's white point sits below blue's, an equal
+remap preserves that imbalance, i.e. the cast passes straight through. The only
+colour-balancing stages ahead of it were the **mean-based** gray-world (Step 5
+`normalizeChannels`, gains clamped [0.5, 2.0]) and the **mean-based**
+residual-cast neutralizer (Step 5b `neutralizeResidualCast`, attenuation-only,
+floored at 0.5). Both are bounded/weak, so whatever cast they left (the
+yellow-green) survived to the output.
+
+### Fix — PER-CHANNEL black/white-point normalization (NLP / SilverFast / darkroom)
+
+Step 6 on the **`color`** path is now `applyPerChannelToneCorrection`, the
+scientifically-correct method professional tools use: compute robust black &
+white points for **each of R, G, B independently** (separate per-channel
+histograms; the same robust **2%/98%** percentiles as before) and map each
+channel's `[blackᵢ, whiteᵢ] → [0,1]` with its **own** slope+bias. This pins both
+neutral **shadows** and neutral **whites** per channel, so it removes **any**
+residual colour cast (the yellow-green now, and robustly in general). It also
+**white-balances off the film base for free**: post-invert, the unexposed orange
+rebate is each channel's brightest region, so it becomes that channel's white
+reference. A subsequent **global** `contrast=1.1` + midtone-lift `gamma=0.8`
+shapes overall **tone only** (applied equally to all channels) and never
+re-introduces a cast. Stage order: per-channel levels remap → global contrast →
+global gamma — the same shape as the old luma curve, just with the black/white
+points made **per-channel**.
+
+### Reconciliation — Steps 5 and 5b on the `color` path
+
+Per-channel normalization **subsumes** mean-based gray-world + the residual
+neutralizer (it is a strictly stronger, exact white/black balance), so to avoid
+double-correcting:
+
+- **Step 5b `neutralizeResidualCast` was DELETED on both platforms** (function +
+  its `kMinNeutralGain` / `MIN_NEUTRAL_GAIN` constant removed). It is no longer
+  called anywhere.
+- **Step 5 `normalizeChannels` is NO LONGER RUN on the `color` path** (the
+  `color` branch goes orange-mask → `applyPerChannelToneCorrection` directly).
+  The function is **retained** because the **`bw`** path still uses it.
+- **Step 4 orange-mask removal is KEPT** — it correctly pre-conditions the
+  channels (removes the bulk of the orange cast) before per-channel normalization
+  finishes the balance.
+
+Per-channel normalization is now the **single source of colour balance** for
+`color`.
+
+### Bounded / degenerate-channel guard (no blow-out)
+
+- The per-channel remap is percentile-based and self-normalising: each channel's
+  white point maps to **exactly 1.0**, so no channel can be pushed above white.
+- **Degenerate-channel guard** (`channelSlopeBias`): if a channel's robust range
+  is `< kMinToneRange` (0.10) the channel is left **UNCHANGED** (slope 1, bias 0).
+  This differs from the luma path, which *floors* the range to still stretch a
+  low-contrast frame; here a per-channel stretch of a near-flat channel would
+  **manufacture a cast from sensor noise** and risk a blow-out, so skipping that
+  channel is the correct, stable choice. (`kMinToneRange` now documents this dual
+  role on both platforms.)
+- **Over-neutralization risk** (a genuinely monochromatic scene) is managed with
+  **robust 2%/98% percentiles** (never absolute min/max) plus the guard above. A
+  neutral default is intended — the user applies Warm/Looks afterwards.
+
+### Modes
+
+- **`color`**: per-channel (new). Single source of colour balance.
+- **`bw`**: a per-channel colour balance is moot (it is desaturated to luminance),
+  so `bw` is **byte-for-byte unchanged** — it still runs the mean-based
+  `normalizeChannels` (Step 5) and the **luma-only** `applyToneCorrection`
+  (Step 6). It never ran Step 5b.
+- **`slide`**: **untouched** — no inversion / no mask / no per-channel negative
+  balancing; still `normalizeSlide` (1%/99% gentle stretch).
+
+### Parity
+
+Implemented **identically on both platforms** with the same constants, logic and
+step order: `applyPerChannelToneCorrection` + `channelSlopeBias` (+ a per-channel
+`robustChannelPoints` on iOS / per-channel reuse of `robustBlackWhitePoints` on
+Android). The black/white points come from an sRGB-encoded histogram on both; iOS
+applies the remap/contrast/gamma in its **linear** working space
+(`CIColorMatrix` → `CIColorControls` → `CIGammaAdjust`), Android in
+**sRGB-encoded** space (per-pixel round-trip via the shared `toneMap`) — the
+**same** accepted linear-vs-sRGB tone split already documented for the luma curve
+and `normalizeSlide`. iOS authoritative.
+
+> **⚠ verify on device:** that a real C-41 frame now yields neutral whites and
+> shadows (yellow-green gone) with believable skin, and that a deliberately
+> monochromatic / strongly-tinted scene is left stable (not over-neutralized) by
+> the 2%/98% + degenerate-guard combination. Confirm iOS and Android agree closely
+> (only divergence: the documented linear-vs-sRGB tone domain + the histogram
+> count-vs-scaled-count equivalence, both already accepted for the luma path).
+> `kMinToneRange = 0.10` (the degenerate-channel threshold) is a conservative
+> first choice and may want tuning against real captures.
 
 ## Residual CYAN-cast fix (this round)
 
@@ -93,6 +194,13 @@ where R is the max, so its red-normalized ratios are naturally ≤ 1 and were ne
 hit by the clamp bug.
 
 ### 2. New Step 5b — `neutralizeResidualCast` (self-correcting safety net)
+
+> **SUPERSEDED / REMOVED (later round).** Step 5b described here was a mean-based
+> safety net. It has since been **deleted on both platforms** — the
+> per-channel black/white-point normalization (see "Residual YELLOW-GREEN cast
+> fix" above) subsumes it exactly. The narrative below is retained for history;
+> `neutralizeResidualCast` and `kMinNeutralGain`/`MIN_NEUTRAL_GAIN` no longer
+> exist in the code.
 
 Because the mask boost is capped at 3.0, a *strongly* masked frame can still leave
 a faint residual cast. A new **attenuation-only auto-white-balance** stage runs on
@@ -199,10 +307,13 @@ To "sample the orange max-density rebate reliably; resist a bright background":
 `estimateFilmBaseNeutral` consumes the same improved sampler, so its `{warmth,
 tint}` suggestion benefits too (mapping/gains unchanged).
 
-> The pipeline is now **structurally incapable of an all-white output**: gray-world
-> gains are clamped [0.5, 2.0]; the mask gains are capped at 3.0; the tone remap
-> pins white at exactly 1.0; the lift gamma (`<1`) and contrast (`1.1`) both keep
-> [0,1] within [0,1]. The worst case is a flat-but-usable frame.
+> The pipeline is still **structurally incapable of an all-white output**: the mask
+> gains are capped at 3.0; the tone remap pins white at exactly 1.0 (luma remap on
+> `bw`, and **each channel's** per-channel remap on `color`, with a
+> degenerate-channel guard so a flat channel is left identity rather than
+> amplified); the lift gamma (`<1`) and contrast (`1.1`) both keep [0,1] within
+> [0,1]; `bw` gray-world gains remain clamped [0.5, 2.0]. The worst case is a
+> flat-but-usable frame.
 
 **`slide` is byte-for-byte unchanged** (it uses `normalizeSlide`, still 1%/99%,
 untouched, and never calls the orange-mask or negative tone path). **`bw` shares
