@@ -304,7 +304,9 @@ class AiImageProcessingModule : Module() {
         r[i] = 1f - r[i]; g[i] = 1f - g[i]; b[i] = 1f - b[i]
       }
 
-      // Step 4 — orange mask removal (colour only). OrangeMaskEstimator.
+      // Step 4 — orange mask removal (colour only). OrangeMaskEstimator. KEPT —
+      // it pre-conditions the channels (removes the bulk of the orange cast)
+      // before the per-channel normalization below finishes the colour balance.
       if (isColor && params.removeOrangeMask) {
         // Prefer the film-base estimate; else fall back to the legacy
         // darkest-region method on the now-inverted channels.
@@ -312,20 +314,39 @@ class AiImageProcessingModule : Module() {
         removeOrangeMask(r, g, b, mask)
       }
 
-      // Step 5 — gray-world channel normalization. ColorCorrector.normalizeChannels.
-      normalizeChannels(r, g, b)
-
-      // Step 5b — residual-cast auto white balance (colour negatives only).
-      // Self-correcting safety net: measures whatever colour cast survived the
-      // orange-mask + gray-world stages (e.g. a residual cyan the capped mask
-      // gains couldn't fully lift) and removes it. ATTENUATION-ONLY, so it is
-      // structurally white-out-safe (see neutralizeResidualCast).
       if (isColor) {
-        neutralizeResidualCast(r, g, b)
-      }
+        // Steps 5/5b/6 — COLOUR balance + tone, in ONE per-channel stage
+        // (Android twin of the iOS `applyPerChannelToneCorrection`).
+        //
+        // PER-CHANNEL NORMALIZATION (the scientifically-correct method used by
+        // Negative Lab Pro / SilverFast / a darkroom enlarger): compute robust
+        // black/white points for R, G and B INDEPENDENTLY and remap each channel
+        // [blackᵢ, whiteᵢ] -> [0,1] on its own. This forces neutral shadows AND
+        // neutral whites per channel, which removes ANY residual colour cast
+        // (the reported yellow-green, and robustly in general), and naturally
+        // "white-balances off the film base" (post-invert, the unexposed orange
+        // rebate is each channel's brightest region -> that channel's white ref).
+        //
+        // SUBSUMES the old mean-based gray-world (Step 5 `normalizeChannels`) and
+        // residual-cast neutralizer (Step 5b `neutralizeResidualCast`): a single
+        // LUMINANCE remap cannot neutralize a per-channel cast, and the mean-based
+        // steps were too weak/bounded to finish, so the cast survived. Both are
+        // REMOVED from the colour path (see PARITY.md); per-channel normalization
+        // is now the SINGLE source of colour balance. The subsequent global
+        // contrast/gamma shape overall TONE only, never colour balance.
+        applyPerChannelToneCorrection(r, g, b)
+      } else {
+        // --- B&W negative path (unchanged) ---------------------------------
+        // A per-channel colour balance is moot for B&W (it is desaturated to
+        // luminance below), so keep the original mean-based gray-world + the
+        // luma-only tone curve byte-for-byte.
 
-      // Step 6 — automatic tone curve. ColorCorrector.applyToneCorrection.
-      applyToneCorrection(r, g, b)
+        // Step 5 — gray-world channel normalization. ColorCorrector.normalizeChannels.
+        normalizeChannels(r, g, b)
+
+        // Step 6 — automatic tone curve. ColorCorrector.applyToneCorrection.
+        applyToneCorrection(r, g, b)
+      }
     }
 
     // Step 7 — user adjustments, in the legacy order. UserAdjustments.
@@ -483,17 +504,15 @@ class AiImageProcessingModule : Module() {
   // pixels are a bright surround/light source, not the dense orange rebate, so
   // they are excluded to resist contamination (iOS kBaseMaxLuma).
   private val BASE_MAX_LUMA = 250f
-  // Minimum luminance range for the auto-tone levels remap; floors the slope so
-  // a flat capture can't be amplified to white (iOS kMinToneRange).
+  // Minimum tone range. In the luma path it floors the remap slope so a flat
+  // capture can't be amplified to white; in the PER-CHANNEL colour balance it is
+  // also the degenerate-channel threshold — a channel whose robust range is below
+  // this is left UNCHANGED (identity) so a flat channel can't be blown out or
+  // manufacture a cast from noise (iOS kMinToneRange).
   private val MIN_TONE_RANGE = 0.10f
   // Midtone-lift gamma power for the auto-tone curve (< 1 brightens midtones for
   // the clean lab-scan look; pow(v,<1) keeps [0,1] within [0,1]) (iOS kToneGamma).
   private val TONE_GAMMA = 0.8f
-  // Lower bound on a per-channel residual-cast gain in neutralizeResidualCast.
-  // Floors the attenuation so a legitimately-coloured scene is only partially
-  // neutralized (at most a 2× pull on the most over-represented channel); gains
-  // live in [MIN_NEUTRAL_GAIN, 1.0], so the stage can never boost (iOS kMinNeutralGain).
-  private val MIN_NEUTRAL_GAIN = 0.5f
 
   /** Clamp a derived density into [MIN_BASE_DENSITY, 1] (iOS clampDensity). */
   private fun clampDensity(v: Float): Float = min(1.0f, max(MIN_BASE_DENSITY, v))
@@ -720,55 +739,16 @@ class AiImageProcessingModule : Module() {
     for (i in 0 until n) { r[i] *= gr; g[i] *= gg; b[i] *= gb }
   }
 
-  // MARK: Step 5b — residual-cast auto white balance (attenuation-only)
-
-  /**
-   * Self-correcting residual-cast removal (the Android twin of iOS
-   * neutralizeResidualCast). Runs AFTER the orange-mask and gray-world stages
-   * and BEFORE the tone curve. It measures whatever colour cast still remains —
-   * most importantly the residual CYAN that the gain-capped removeOrangeMask
-   * plus gray-world can leave on a strongly orange-masked negative — and drives
-   * the three channel means toward neutral.
-   *
-   * WHITE-OUT SAFETY (structural): the correction is ATTENUATION-ONLY. The gain
-   * reference is the *minimum* channel mean, so the darkest channel keeps gain
-   * 1.0 and the brighter channels are scaled DOWN (gain <= 1.0). No channel is
-   * ever multiplied above 1.0, so no pixel value can increase and the frame can
-   * never be pushed to white. Gains are floored at MIN_NEUTRAL_GAIN so a
-   * genuinely-coloured scene is not over-neutralized. The slight overall
-   * darkening from pulling the bright channels down is re-expanded by the
-   * following tone curve (levels stretch + midtone lift), which re-pins white at
-   * 1.0 — net effect "neutral, then correctly exposed" (the FilmBox/Kodak look).
-   *
-   * Mean-domain note: computed over LINEAR pixels here, mirroring how this
-   * module's normalizeChannels takes its mean; iOS uses CIAreaAverage rendered
-   * to sRGB. This is the SAME accepted linear-vs-sRGB mean-domain difference
-   * already documented for gray-world in PARITY.md (iOS authoritative); it only
-   * nudges the measured cast a hair, the neutralization logic is identical.
-   */
-  private fun neutralizeResidualCast(r: FloatArray, g: FloatArray, b: FloatArray) {
-    val n = r.size
-    var sumR = 0.0; var sumG = 0.0; var sumB = 0.0
-    for (i in 0 until n) {
-      sumR += clamp01(r[i]).toDouble(); sumG += clamp01(g[i]).toDouble(); sumB += clamp01(b[i]).toDouble()
-    }
-    val meanR = (sumR / n).toFloat()
-    val meanG = (sumG / n).toFloat()
-    val meanB = (sumB / n).toFloat()
-
-    // Attenuation reference = the dimmest channel mean. Dividing by each mean
-    // yields a gain in (0, 1] for the brighter channels and exactly 1.0 for the
-    // dimmest — never a boost (the white-out guarantee). Floor each gain so a
-    // strongly-coloured scene is only partially corrected.
-    val reference = minOf(meanR, meanG, meanB)
-    fun gain(mean: Float): Float {
-      val raw = reference / max(mean, 0.01f)
-      // raw is already <= 1 by construction; floor it and belt-and-braces cap at 1.
-      return min(max(raw, MIN_NEUTRAL_GAIN), 1.0f)
-    }
-    val gr = gain(meanR); val gg = gain(meanG); val gb = gain(meanB)
-    for (i in 0 until n) { r[i] *= gr; g[i] *= gg; b[i] *= gb }
-  }
+  // MARK: Step 5b — REMOVED (subsumed by per-channel normalization)
+  //
+  // The mean-based residual-cast auto white balance (`neutralizeResidualCast`,
+  // attenuation-only, floored at MIN_NEUTRAL_GAIN) used to run here on the
+  // `color` path to mop up whatever cast survived gray-world. It is now DELETED:
+  // the per-channel black/white-point normalization in
+  // `applyPerChannelToneCorrection` neutralizes shadows AND whites per channel
+  // exactly, so a separate mean-based neutralizer is both redundant and (being
+  // bounded/weak) was part of why a residual yellow-green could survive. See
+  // PARITY.md. `bw` never used Step 5b. Kept in lockstep with the iOS removal.
 
   // MARK: Step 6 — tone correction (ColorCorrector.calculateToneCurve/applyToneCurve)
 
@@ -884,6 +864,110 @@ class AiImageProcessingModule : Module() {
     v = clamp01(v)
     v = v.pow(gammaPower)                     // gamma
     return srgbToLinear(clamp01(v))
+  }
+
+  // MARK: Step 5/5b/6 — PER-CHANNEL automatic colour balance + tone
+
+  /**
+   * Robust automatic colour balance via PER-CHANNEL black/white-point
+   * normalization — the Android twin of the iOS `applyPerChannelToneCorrection`,
+   * and the scientifically-correct method (Negative Lab Pro / SilverFast / a
+   * darkroom colour enlarger) that fixes the residual yellow-green cast a single
+   * LUMINANCE remap (the old `applyToneCorrection`) could not remove.
+   *
+   * WHY PER-CHANNEL: the old Step 6 built ONE luminance histogram and applied a
+   * single (black, white) remap equally to R, G and B. That rescales overall
+   * brightness/contrast but is mathematically incapable of neutralizing a
+   * per-channel colour cast — if red's white point sits lower than blue's, an
+   * equal remap leaves that imbalance (a cast) untouched. The mean-based
+   * gray-world + residual neutralizer before it were bounded/weak and left a
+   * residual, so the cast survived to the output. Here we compute robust
+   * black/white points for EACH channel INDEPENDENTLY and map each channel's
+   * [blackᵢ, whiteᵢ] -> [0,1] on its own, forcing neutral shadows AND neutral
+   * whites per channel — removing ANY residual cast. It also "white-balances off
+   * the film base" for free: post-invert, the unexposed orange rebate is each
+   * channel's brightest region and becomes that channel's white reference.
+   *
+   * This replaces — and SUBSUMES — gray-world (Step 5) + residual-cast
+   * neutralizer (Step 5b) on the colour path; neither is called for `color`.
+   *
+   * BOUNDED / WHITE-OUT-SAFE: the per-channel remap is percentile-based and
+   * self-normalising — each channel's white point maps to EXACTLY 1.0, so no
+   * channel can be pushed above white. A DEGENERATE-CHANNEL GUARD skips the remap
+   * for any channel whose robust range < MIN_TONE_RANGE (slope 1, bias 0 —
+   * identity), so a flat channel can never be amplified to white. Robust 2%/98%
+   * percentiles (not absolute min/max) keep a near-monochromatic scene stable
+   * rather than over-neutralized; a neutral default is intended (the user applies
+   * Warm/Looks afterwards).
+   *
+   * Stage order mirrors `applyToneCorrection`: per-channel levels remap -> global
+   * contrast(1.1) -> global midtone-lift gamma(TONE_GAMMA), applied via the
+   * shared `toneMap` per channel. Contrast + gamma are EQUAL across channels, so
+   * they shape overall TONE only and never re-introduce a cast. As with the luma
+   * curve, Android runs the remap/contrast/gamma in sRGB-encoded space (per-pixel
+   * round-trip in `toneMap`) while iOS runs them in its linear working space, and
+   * both derive the points from an sRGB-encoded histogram — the same accepted
+   * linear-vs-sRGB tone split documented in PARITY.md. iOS authoritative.
+   */
+  private fun applyPerChannelToneCorrection(r: FloatArray, g: FloatArray, b: FloatArray) {
+    val n = r.size
+    // Build INDEPENDENT 256-bin histograms for R, G and B, sampled in
+    // sRGB-encoded bins (matching the CIAreaHistogram domain on iOS).
+    val histR = DoubleArray(256)
+    val histG = DoubleArray(256)
+    val histB = DoubleArray(256)
+    for (i in 0 until n) {
+      val rs = linearToSrgb(clamp01(r[i]))
+      val gs = linearToSrgb(clamp01(g[i]))
+      val bs = linearToSrgb(clamp01(b[i]))
+      histR[min((rs * 255f).toInt(), 255)] += 1.0
+      histG[min((gs * 255f).toInt(), 255)] += 1.0
+      histB[min((bs * 255f).toInt(), 255)] += 1.0
+    }
+
+    // Robust per-channel black/white points (same 2%/98% robustness as the luma
+    // path, computed PER CHANNEL via the shared robustBlackWhitePoints).
+    val (rBlack, rWhite) = robustBlackWhitePoints(histR)
+    val (gBlack, gWhite) = robustBlackWhitePoints(histG)
+    val (bBlack, bWhite) = robustBlackWhitePoints(histB)
+
+    // Per-channel slope/bias mapping [blackᵢ, whiteᵢ] -> [0,1]. The degenerate
+    // guard lives in channelSlopeBias: a channel whose robust range is below
+    // MIN_TONE_RANGE gets slope 1 / bias 0 (identity) so it cannot be blown out.
+    val (rSlope, rBias) = channelSlopeBias(rBlack, rWhite)
+    val (gSlope, gBias) = channelSlopeBias(gBlack, gWhite)
+    val (bSlope, bBias) = channelSlopeBias(bBlack, bWhite)
+
+    // Global TONE shaping shared across channels (matches the luma path / iOS).
+    val contrast = 1.1f
+    val gammaPower = TONE_GAMMA
+
+    // Independent per-channel levels remap + the shared global contrast/gamma,
+    // all via toneMap (sRGB-encoded space). Each channel's white point lands at
+    // exactly 1.0, so no channel can be pushed above white; the three independent
+    // maps remove any per-channel cast (neutral shadows + neutral whites/channel).
+    for (i in 0 until n) {
+      r[i] = toneMap(r[i], rSlope, rBias, contrast, gammaPower)
+      g[i] = toneMap(g[i], gSlope, gBias, contrast, gammaPower)
+      b[i] = toneMap(b[i], bSlope, bBias, contrast, gammaPower)
+    }
+  }
+
+  /**
+   * Slope/bias that maps `[black, white] -> [0, 1]`, with the DEGENERATE-CHANNEL
+   * GUARD: if the robust range is below MIN_TONE_RANGE the channel is left
+   * UNCHANGED (slope 1, bias 0). Unlike the luma path — which FLOORS the range so
+   * a low-contrast frame is still stretched — a per-channel stretch of a
+   * near-flat channel would manufacture a colour cast out of sensor noise and
+   * risk a blow-out, so the correct choice is to skip that channel entirely.
+   * Mirrors the iOS `channelSlopeBias`.
+   */
+  private fun channelSlopeBias(black: Float, white: Float): Pair<Float, Float> {
+    val range = white - black
+    if (range < MIN_TONE_RANGE) return Pair(1.0f, 0.0f)
+    val slope = 1.0f / range
+    val bias = -black / range
+    return Pair(slope, bias)
   }
 
   // MARK: Step 7 — user adjustments (UserAdjustments.applyAdjustments order)

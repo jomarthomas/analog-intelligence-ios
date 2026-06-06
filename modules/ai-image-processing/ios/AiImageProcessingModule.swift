@@ -258,7 +258,7 @@ public class AiImageProcessingModule: Module {
       // the user adjustments and sharpen. (legacy FilmType.slide intent.)
       image = normalizeSlide(image: image)
     } else {
-      // --- Colour / B&W negative path (unchanged) --------------------------
+      // --- Colour / B&W negative path -------------------------------------
       // Capture the linearized (and, if requested, downscaled) PRE-invert image
       // so the film-base sampler reads the same pixels the inversion consumes —
       // the brightest orange max-density base lives here.
@@ -269,7 +269,9 @@ public class AiImageProcessingModule: Module {
       image = invert(image)
 
       // Step 4 — Estimate + remove orange mask (colour negatives only).
-      // OrangeMaskEstimator.removeOrangeMask.
+      // OrangeMaskEstimator.removeOrangeMask. KEPT — it pre-conditions the
+      // channels (removes the bulk of the orange cast) before the per-channel
+      // normalization below finishes the colour balance.
       if isColor && params.removeOrangeMask {
         // Film-base (rebate) sampling reads the PRE-INVERT image so the brightest
         // orange max-density base is available; the post-invert `image` is the
@@ -278,22 +280,40 @@ public class AiImageProcessingModule: Module {
         image = removeOrangeMask(image: image, mask: mask)
       }
 
-      // Step 5 — Normalize colour channels (gray-world).
-      // ColorCorrector.normalizeChannels.
-      image = normalizeChannels(image: image)
-
-      // Step 5b — Residual-cast auto white balance (colour negatives only).
-      // Self-correcting safety net: measures whatever colour cast survived the
-      // orange-mask + gray-world stages (e.g. a residual cyan the capped mask
-      // gains couldn't fully lift) and removes it. ATTENUATION-ONLY, so it is
-      // structurally white-out-safe (see neutralizeResidualCast).
       if isColor {
-        image = neutralizeResidualCast(image: image)
+        // Steps 5/5b/6 — COLOUR balance + tone, in ONE per-channel stage.
+        //
+        // PER-CHANNEL NORMALIZATION (the scientifically-correct method used by
+        // Negative Lab Pro / SilverFast / a darkroom enlarger): compute robust
+        // black/white points for R, G and B INDEPENDENTLY and remap each channel
+        // [blackᵢ, whiteᵢ] → [0,1] on its own. This forces neutral shadows AND
+        // neutral whites per channel, which removes ANY residual colour cast
+        // (the reported yellow-green, and robustly in general) — and it naturally
+        // "white-balances off the film base": post-invert, the unexposed orange
+        // rebate is each channel's brightest region and becomes that channel's
+        // white reference.
+        //
+        // This SUBSUMES the old mean-based gray-world (Step 5 `normalizeChannels`)
+        // and residual-cast neutralizer (Step 5b `neutralizeResidualCast`) — a
+        // single LUMINANCE remap mathematically cannot neutralize a per-channel
+        // cast, and the mean-based steps were too weak/bounded to finish the job,
+        // so the cast survived. Both are therefore REMOVED from the colour path
+        // (see PARITY.md); per-channel normalization is now the SINGLE source of
+        // colour balance. The subsequent global contrast/gamma shapes overall
+        // TONE only (applied equally to all channels), never colour balance.
+        image = applyPerChannelToneCorrection(image: image)
+      } else {
+        // --- B&W negative path (unchanged) ---------------------------------
+        // A per-channel colour balance is moot for B&W (it is desaturated to
+        // luminance below), so keep the original mean-based gray-world + the
+        // luma-only tone curve byte-for-byte.
+        //
+        // Step 5 — Normalize colour channels (gray-world). normalizeChannels.
+        image = normalizeChannels(image: image)
+        // Step 6 — Automatic tone correction (luma histogram → levels + gamma).
+        // ColorCorrector.applyToneCorrection.
+        image = applyToneCorrection(image: image)
       }
-
-      // Step 6 — Automatic tone correction (histogram CDF → levels + gamma).
-      // ColorCorrector.applyToneCorrection.
-      image = applyToneCorrection(image: image)
     }
 
     // Step 7 — User adjustments (exposure/highlights+shadows/contrast/warmth/
@@ -868,77 +888,15 @@ public class AiImageProcessingModule: Module {
     return m.outputImage ?? image
   }
 
-  // MARK: Step 5b — residual-cast auto white balance (attenuation-only)
-
-  /// Lower bound on a per-channel residual-cast gain. Floors the attenuation so
-  /// a legitimately-coloured scene (sunset, foliage) is only *partially*
-  /// neutralized rather than flattened to grey — at most a 2× pull on the most
-  /// over-represented channel. (Gains live in `[kMinNeutralGain, 1.0]`.)
-  private static let kMinNeutralGain: Float = 0.5
-
-  /// Self-correcting residual-cast removal that runs AFTER the orange-mask and
-  /// gray-world stages and BEFORE the tone curve. It measures whatever colour
-  /// cast still remains — most importantly the residual CYAN that the
-  /// gain-capped `removeOrangeMask` plus gray-world can leave on a strongly
-  /// orange-masked negative — and drives the three channel means toward neutral.
-  ///
-  /// WHITE-OUT SAFETY (structural): the correction is ATTENUATION-ONLY. The gain
-  /// reference is the *minimum* channel mean, so the darkest channel keeps gain
-  /// 1.0 and the brighter channels are scaled DOWN (gain ≤ 1.0). No channel is
-  /// ever multiplied above 1.0, so no pixel value can increase and the frame can
-  /// never be pushed to white. Gains are floored at `kMinNeutralGain` so a
-  /// genuinely-coloured scene is not over-neutralized. The slight overall
-  /// darkening from pulling the bright channels down is re-expanded by the
-  /// following tone curve (levels stretch + midtone lift), which re-pins white
-  /// at 1.0 — so the net effect is "neutral, then correctly exposed", the
-  /// FilmBox/Kodak-lab look, with the cast removed.
-  ///
-  /// Measures the means with `CIAreaAverage` rendered to sRGB, the SAME mean
-  /// domain as `normalizeChannels`, for cross-stage and cross-platform parity.
-  private func neutralizeResidualCast(image: CIImage) -> CIImage {
-    let extent = image.extent
-    let avg = CIFilter(name: "CIAreaAverage")!
-    avg.setValue(image, forKey: kCIInputImageKey)
-    avg.setValue(CIVector(cgRect: extent), forKey: kCIInputExtentKey)
-    guard let avgImage = avg.outputImage else { return image }
-
-    var bitmap = [UInt8](repeating: 0, count: 4)
-    ciContext.render(
-      avgImage,
-      toBitmap: &bitmap,
-      rowBytes: 4,
-      bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-      format: .RGBA8,
-      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
-    )
-
-    let r = Float(bitmap[0]) / 255.0
-    let g = Float(bitmap[1]) / 255.0
-    let b = Float(bitmap[2]) / 255.0
-
-    // Attenuation reference = the dimmest channel mean. Dividing by each mean
-    // yields a gain in (0, 1] for the brighter channels and exactly 1.0 for the
-    // dimmest — never a boost (the white-out guarantee). Floor each gain so a
-    // strongly-coloured scene is only partially corrected.
-    let reference = min(r, min(g, b))
-    func gain(_ mean: Float) -> CGFloat {
-      let raw = reference / max(mean, 0.01)
-      // raw is already ≤ 1 by construction; floor it and belt-and-braces cap at 1.
-      return CGFloat(min(max(raw, Self.kMinNeutralGain), 1.0))
-    }
-    let redGain = gain(r)
-    let greenGain = gain(g)
-    let blueGain = gain(b)
-
-    let m = CIFilter(name: "CIColorMatrix")!
-    m.setValue(image, forKey: kCIInputImageKey)
-    m.setValue(CIVector(x: redGain, y: 0, z: 0, w: 0), forKey: "inputRVector")
-    m.setValue(CIVector(x: 0, y: greenGain, z: 0, w: 0), forKey: "inputGVector")
-    m.setValue(CIVector(x: 0, y: 0, z: blueGain, w: 0), forKey: "inputBVector")
-    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
-    m.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBiasVector")
-    return m.outputImage ?? image
-  }
+  // MARK: Step 5b — REMOVED (subsumed by per-channel normalization)
+  //
+  // The mean-based residual-cast auto white balance (`neutralizeResidualCast`,
+  // attenuation-only, floored at 0.5) used to run here on the `color` path to
+  // mop up whatever cast survived gray-world. It is now DELETED: the per-channel
+  // black/white-point normalization in `applyPerChannelToneCorrection` neutralizes
+  // shadows AND whites per channel exactly, so a separate mean-based neutralizer
+  // is both redundant and (being bounded/weak) was part of why a residual
+  // yellow-green could survive. See PARITY.md. `bw` never used Step 5b.
 
   // MARK: Step 6 — automatic tone correction (ColorCorrector)
 
@@ -1028,15 +986,166 @@ public class AiImageProcessingModule: Module {
     return gammaF.outputImage ?? contrasted
   }
 
+  // MARK: Step 5/5b/6 — PER-CHANNEL automatic colour balance + tone
+
+  /// Robust automatic colour balance via **per-channel** black/white-point
+  /// normalization — the scientifically-correct method used by Negative Lab Pro,
+  /// SilverFast and a darkroom colour enlarger, and the fix for the residual
+  /// yellow-green cast a single LUMINANCE remap (the old `applyToneCorrection`)
+  /// could not remove.
+  ///
+  /// WHY PER-CHANNEL: the old Step 6 built ONE luminance histogram and applied a
+  /// single (black, white) remap equally to R, G and B. That can rescale overall
+  /// brightness/contrast but is mathematically incapable of neutralizing a
+  /// per-channel colour cast — if red's white point sits lower than blue's, an
+  /// equal remap leaves that imbalance (a colour cast) untouched. The mean-based
+  /// gray-world + residual neutralizer that preceded it were bounded/weak and
+  /// left a residual, so the cast survived to the output. Here we instead compute
+  /// robust black/white points for EACH channel INDEPENDENTLY and map each
+  /// channel's [blackᵢ, whiteᵢ] → [0,1] on its own, which forces neutral shadows
+  /// AND neutral whites per channel — removing ANY residual cast. It also
+  /// "white-balances off the film base" for free: post-invert, the unexposed
+  /// orange rebate is each channel's brightest region, so it becomes that
+  /// channel's white reference.
+  ///
+  /// This replaces — and SUBSUMES — gray-world (Step 5) + residual-cast
+  /// neutralizer (Step 5b) on the colour path; they are not called for `color`.
+  ///
+  /// BOUNDED / WHITE-OUT-SAFE: the per-channel remap is percentile-based and
+  /// self-normalising — each channel's white point maps to EXACTLY 1.0, so no
+  /// channel can be pushed above white. A DEGENERATE-CHANNEL GUARD skips the
+  /// remap for any channel whose robust range < `kMinToneRange` (slope 1, bias 0
+  /// — identity), so a flat channel can never be amplified to white. Robust
+  /// 2%/98% percentiles (not absolute min/max) keep a near-monochromatic scene
+  /// stable rather than over-neutralized; a neutral default is intended (the user
+  /// applies Warm/Looks afterwards).
+  ///
+  /// Stage order mirrors `applyToneCorrection`: per-channel levels remap →
+  /// global contrast(1.1) → global midtone-lift gamma(`kToneGamma`). The contrast
+  /// + gamma are applied EQUALLY to all channels, so they shape overall TONE only
+  /// and never re-introduce a cast. The black/white points come from an
+  /// sRGB-encoded `CIAreaHistogram` (the same domain as the luma path); the
+  /// remap/contrast/gamma run on the linear working image (CIColorMatrix →
+  /// CIColorControls → CIGammaAdjust), the SAME accepted linear-vs-sRGB tone
+  /// split already documented for the luma curve in PARITY.md. iOS authoritative.
+  private func applyPerChannelToneCorrection(image: CIImage) -> CIImage {
+    let extent = image.extent
+    let hist = CIFilter(name: "CIAreaHistogram")!
+    hist.setValue(image, forKey: kCIInputImageKey)
+    hist.setValue(CIVector(cgRect: extent), forKey: "inputExtent")
+    hist.setValue(256, forKey: "inputCount")
+    guard let histOut = hist.outputImage else { return image }
+
+    // One RGBA8 histogram render gives independent R, G and B bin counts.
+    var data = [UInt8](repeating: 0, count: 256 * 4)
+    ciContext.render(
+      histOut,
+      toBitmap: &data,
+      rowBytes: 256 * 4,
+      bounds: histOut.extent,
+      format: .RGBA8,
+      colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+    )
+
+    // Robust per-channel black/white points (channel offsets 0=R, 1=G, 2=B).
+    let (rBlack, rWhite) = robustChannelPoints(histogram: data, channel: 0)
+    let (gBlack, gWhite) = robustChannelPoints(histogram: data, channel: 1)
+    let (bBlack, bWhite) = robustChannelPoints(histogram: data, channel: 2)
+
+    // Per-channel slope/bias mapping [blackᵢ, whiteᵢ] → [0,1]. The degenerate
+    // guard lives in `channelSlopeBias`: a channel whose robust range is below
+    // `kMinToneRange` gets slope 1 / bias 0 (identity) so it cannot be blown out.
+    let (rSlope, rBias) = channelSlopeBias(black: rBlack, white: rWhite)
+    let (gSlope, gBias) = channelSlopeBias(black: gBlack, white: gWhite)
+    let (bSlope, bBias) = channelSlopeBias(black: bBlack, white: bWhite)
+
+    // Stage 1: INDEPENDENT per-channel levels remap via CIColorMatrix. Each
+    // channel's white point lands at exactly 1.0, so this stage can never push a
+    // channel above white (white-out-safe), and the three independent maps remove
+    // any per-channel cast (neutral shadows + neutral whites per channel).
+    let levels = CIFilter(name: "CIColorMatrix")!
+    levels.setValue(image, forKey: kCIInputImageKey)
+    levels.setValue(CIVector(x: rSlope, y: 0, z: 0, w: 0), forKey: "inputRVector")
+    levels.setValue(CIVector(x: 0, y: gSlope, z: 0, w: 0), forKey: "inputGVector")
+    levels.setValue(CIVector(x: 0, y: 0, z: bSlope, w: 0), forKey: "inputBVector")
+    levels.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+    levels.setValue(CIVector(x: rBias, y: gBias, z: bBias, w: 0), forKey: "inputBiasVector")
+    guard let leveled = levels.outputImage else { return image }
+
+    // Stage 2: gentle global contrast about mid-grey (unchanged 1.1) — TONE only.
+    let contrastF = CIFilter(name: "CIColorControls")!
+    contrastF.setValue(leveled, forKey: kCIInputImageKey)
+    contrastF.setValue(Float(1.1), forKey: kCIInputContrastKey)
+    guard let contrasted = contrastF.outputImage else { return leveled }
+
+    // Stage 3: gentle global midtone-lift gamma (unchanged kToneGamma) — TONE
+    // only; pow(v,<1) keeps [0,1] within [0,1], so white stays pinned at 1.0.
+    let gammaF = CIFilter(name: "CIGammaAdjust")!
+    gammaF.setValue(contrasted, forKey: kCIInputImageKey)
+    gammaF.setValue(Self.kToneGamma, forKey: "inputPower")
+    return gammaF.outputImage ?? contrasted
+  }
+
+  /// Slope/bias that maps `[black, white] → [0, 1]`, with the DEGENERATE-CHANNEL
+  /// GUARD: if the robust range is below `kMinToneRange` the channel is left
+  /// UNCHANGED (slope 1, bias 0). Unlike the luma path — which FLOORS the range
+  /// so a low-contrast frame is still stretched — a per-channel stretch of a
+  /// near-flat channel would manufacture a colour cast out of sensor noise and
+  /// risk a blow-out, so the correct choice is to skip that channel entirely.
+  private func channelSlopeBias(black: Float, white: Float) -> (slope: CGFloat, bias: CGFloat) {
+    let range = white - black
+    guard range >= Self.kMinToneRange else { return (1.0, 0.0) }
+    let slope = CGFloat(1.0 / range)
+    let bias = CGFloat(-Double(black) / Double(range))
+    return (slope, bias)
+  }
+
+  /// Robust black/white points for a SINGLE channel of a 256-bin RGBA8
+  /// histogram (CIAreaHistogram output, sRGB-encoded). `channel` selects the
+  /// byte offset (0=R, 1=G, 2=B). Returns the bin positions (normalized [0,1]) at
+  /// that channel's 2nd and 98th percentiles — the same 2%/98% robustness the
+  /// luma `robustBlackWhitePoints` uses, just computed PER CHANNEL so the three
+  /// independent maps can neutralize a per-channel cast. The brightest/darkest
+  /// ~2% (hot/dead pixels, specular glints, a black surround) are ignored so they
+  /// never define a channel's mapping. A guaranteed minimum black↔white
+  /// separation is enforced for a degenerate (single-bin) channel; the caller's
+  /// `channelSlopeBias` guard then skips any channel whose range stays tiny.
+  private func robustChannelPoints(histogram data: [UInt8], channel: Int) -> (black: Float, white: Float) {
+    var total: Float = 0
+    for bin in 0..<256 {
+      total += Float(data[bin * 4 + channel])
+    }
+    let safeTotal = max(total, 1.0)
+
+    var blackBin = 0
+    var whiteBin = 255
+    var foundBlack = false
+    var cumulative: Float = 0
+    for bin in 0..<256 {
+      cumulative += Float(data[bin * 4 + channel])
+      let cdf = cumulative / safeTotal
+      // 2% / 98% robust percentiles (ignore this channel's darkest/brightest ~2%).
+      if !foundBlack && cdf >= 0.02 { blackBin = bin; foundBlack = true }
+      if cdf >= 0.98 { whiteBin = bin; break }
+    }
+
+    if whiteBin <= blackBin {
+      whiteBin = min(255, blackBin + Int(Self.kMinToneRange * 255.0))
+    }
+    return (Float(blackBin) / 255.0, Float(whiteBin) / 255.0)
+  }
+
   /// Midtone-lift gamma power for the auto-tone curve. < 1 brightens midtones
   /// (lifts mid-grey ~0.5 → ~0.57) for a clean lab-scan look; > 1 would darken.
   /// `pow(v, kToneGamma)` keeps [0,1] within [0,1], so it never blows to white.
   private static let kToneGamma: Float = 0.8
 
-  /// Minimum luminance range used by the auto-tone levels remap. Floors the
-  /// slope (`1/range`) so a flat or near-monochrome capture can't be amplified
-  /// hard enough to clip to pure white — the worst case is a low-contrast but
-  /// still-visible image.
+  /// Minimum tone range. In the luma path it floors the remap slope (`1/range`)
+  /// so a flat or near-monochrome capture can't be amplified hard enough to clip
+  /// to pure white. In the PER-CHANNEL colour balance it is also the
+  /// degenerate-channel threshold — a channel whose robust range is below this is
+  /// left UNCHANGED (identity, in `channelSlopeBias`) so a flat channel can't be
+  /// blown out or manufacture a cast from noise.
   private static let kMinToneRange: Float = 0.10
 
   /// Robust black/white points from a 256-bin RGBA8 histogram (CIAreaHistogram
