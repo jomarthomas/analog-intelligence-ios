@@ -11,6 +11,19 @@ export type { CameraScanViewProps, CaptureMeta } from './CameraScanView';
 export { FilmGuideOverlay } from './FilmGuideOverlay';
 export type { FilmGuideOverlayProps } from './FilmGuideOverlay';
 
+export { LivePositiveOverlay } from './LivePositiveOverlay';
+export type { LivePositiveOverlayProps } from './LivePositiveOverlay';
+
+export { useLivePositivePreview } from './useLivePositivePreview';
+export type { LivePositivePreview } from './useLivePositivePreview';
+
+export {
+  buildInvertPreviewMatrix,
+  INVERT_PREVIEW_MATRIX,
+  DEFAULT_INVERT_PREVIEW_PARAMS,
+} from './invertMatrix';
+export type { InvertPreviewParams } from './invertMatrix';
+
 export { autoCropToFilmFrame } from './autoCrop';
 export type { AutoCropResult } from './autoCrop';
 
